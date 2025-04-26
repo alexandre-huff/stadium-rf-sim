@@ -116,7 +116,7 @@ class StadiumSimulation:
 
         # Create UE objects and calculate their signal metrics
         for i in range(len(x_positions)):
-            ue = UE(x_positions[i], y_positions[i], z_positions[i])
+            ue = UE(x_positions[i], y_positions[i], z_positions[i] + self.ue_height)
             ue.calculate_signal_metrics(self.radio_units)
             self.ues.append(ue)
 
