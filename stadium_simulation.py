@@ -1,0 +1,305 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+from typing import List, Dict
+from stadium_tier import StadiumTier
+from radio_unit import RadioUnit
+from user_equipment import UE
+
+class StadiumSimulation:
+    def __init__(self):
+        # Stadium dimensions (in meters)
+        self.field_length = 105  # Standard football field length
+        self.field_width = 68    # Standard football field width
+        self.technical_area_width = 5  # Width of technical area around the field
+
+        # Multi-tier configuration
+        self.tiers = [
+            StadiumTier(height=0, depth=20, angle=25),    # Lower tier
+            StadiumTier(height=15, depth=15, angle=30),   # Middle tier
+            StadiumTier(height=30, depth=10, angle=35)    # Upper tier
+        ]
+
+        # Initialize arrays for visualization
+        self.ue_positions = np.empty((2, 0))  # 2xN array for x,y positions
+        self.ue_heights = np.array([])        # Array for z positions
+        self.ue_signal_strength = np.array([]) # Array for signal strengths
+
+        # Keep track of total UEs
+        self.total_ues = 0
+
+        # TODO Things to add/modify in the simulation
+        # Each RU must work with a 100Mhz channel (needs to add a channel per RU and increment it by 100Mhz for each added RU)
+        # Interference only between UEs
+        # Add CQI measurement and replace RSRP-based colormap by CQI-based colormap
+        # Set the number of RUs based on a configuration file
+
+        # 5G network parameters (more realistic values)
+        self.frequency = 3.5  # Center frequency in GHz (typical for 5G mid-band)
+        self.bs_height = 25   # Height of radio units in meters
+        self.ue_height = 1.5  # Height of UEs in meters (when standing)
+        self.bs_tx_power = 46 # Radio unit transmission power in dBm
+
+        # Shadow fading parameters
+        self.shadow_std_los = 4.0    # Standard deviation for LOS shadow fading
+        self.shadow_std_nlos = 7.8   # Standard deviation for NLOS shadow fading
+
+        # Initialize radio units with default power
+        self.radio_units = [
+            RadioUnit(x, y, z, self.bs_tx_power)
+            for x, y, z in [
+                [-self.field_length/2 - 5, -self.field_width/4, self.bs_height],   # West side 1
+                [-self.field_length/2 - 5, self.field_width/4, self.bs_height],    # West side 2
+                [self.field_length/2 + 5, -self.field_width/4, self.bs_height],    # East side 1
+                [self.field_length/2 + 5, self.field_width/4, self.bs_height],     # East side 2
+                [-self.field_length/4, -self.field_width/2 - 5, self.bs_height],   # South side 1
+                [self.field_length/4, -self.field_width/2 - 5, self.bs_height],    # South side 2
+                [-self.field_length/4, self.field_width/2 + 5, self.bs_height],    # North side 1
+                [self.field_length/4, self.field_width/2 + 5, self.bs_height]      # North side 2
+            ]
+        ]
+
+        self.ues: List[UE] = []  # List to store UE objects
+
+    def get_ues(self) -> List[UE]:
+        """Get the list of UEs in the simulation"""
+        return self.ues
+
+    def add_ues(self, num_new_ues):
+        """Add a specified number of new UEs to the stadium simulation"""
+        if num_new_ues <= 0:
+            print("Number of new UEs must be positive")
+            return
+
+        # Generate positions for new UEs
+        x_positions = []
+        y_positions = []
+        z_positions = []
+
+        # Distribute new UEs evenly across tiers
+        ues_per_tier = num_new_ues // len(self.tiers)
+        remaining_ues = num_new_ues % len(self.tiers)
+
+        for tier_idx, tier in enumerate(self.tiers):
+            # Add extra UE to this tier if we have remaining ones
+            tier_ues = ues_per_tier + (1 if tier_idx < remaining_ues else 0)
+            base_height = tier.height
+
+            current_tier_ues = 0
+            while current_tier_ues < tier_ues:
+                # Generate random position along stadium perimeter
+                angle = np.random.uniform(0, 2*np.pi)
+
+                # Calculate base coordinates at the inner edge of tier
+                base_x = (self.field_length/2 + self.technical_area_width) * np.cos(angle)
+                base_y = (self.field_width/2 + self.technical_area_width) * np.sin(angle)
+
+                # Generate random distance along tier depth
+                depth_fraction = np.random.uniform(0, 1)
+                distance = depth_fraction * tier.depth
+
+                # Calculate actual position including tier angle
+                height_increase = distance * np.tan(np.radians(tier.angle))
+                x = base_x + distance * np.cos(angle)
+                y = base_y + distance * np.sin(angle)
+                z = base_height + height_increase
+
+                # Verify position is valid
+                if self.is_valid_position(x, y):
+                    x_positions.append(x)
+                    y_positions.append(y)
+                    z_positions.append(z)
+                    current_tier_ues += 1
+
+        # Create UE objects and calculate their signal metrics
+        for i in range(len(x_positions)):
+            ue = UE(x_positions[i], y_positions[i], z_positions[i])
+            ue.calculate_signal_metrics(self.radio_units)
+            self.ues.append(ue)
+
+        # Update total UE count
+        self.total_ues += num_new_ues
+
+        # Calculate signal strength for visualization
+        self.calculate_signal_strength()
+
+        print(f"Successfully added {num_new_ues} new UEs. Total UEs: {self.total_ues}")
+
+    def generate_ue_positions(self):
+        """Generate uniformly distributed UE positions in the multi-tier stands"""
+        self.ue_positions = np.empty((2, 0))
+        self.ue_heights = np.array([])
+        self.total_ues = 0
+        self.ues = []
+
+    def is_valid_position(self, x, y):
+        """Check if a position is valid within the stadium structure"""
+        # Calculate stadium bounds
+        max_x = self.field_length/2 + self.technical_area_width + sum(tier.depth for tier in self.tiers)
+        max_y = self.field_width/2 + self.technical_area_width + sum(tier.depth for tier in self.tiers)
+
+        # Check if point is within bounds and not in technical/field area
+        is_within_bounds = abs(x) <= max_x and abs(y) <= max_y
+        is_outside_technical = (abs(x) > (self.field_length/2 + self.technical_area_width) or
+                              abs(y) > (self.field_width/2 + self.technical_area_width))
+
+        return is_within_bounds and is_outside_technical
+
+    def set_ru_power(self, ru_idx: int, power: float):
+        """Set the transmission power of a specific radio unit"""
+        if ru_idx < 0 or ru_idx >= len(self.radio_units):
+            raise ValueError(f"Invalid radio unit index: {ru_idx}")
+
+        self.radio_units[ru_idx].set_tx_power(power)
+        # Recalculate signal metrics for all UEs
+        for ue in self.ues:
+            ue.calculate_signal_metrics(self.radio_units)
+        # Update visualization data
+        self.calculate_signal_strength()
+
+    def calculate_signal_strength(self):
+        """Calculate received signal strength for all UEs from all radio units"""
+        if not self.ues:
+            return
+
+        # Update signal metrics for all UEs
+        for ue in self.ues:
+            ue.calculate_signal_metrics(self.radio_units)
+
+        # Store data for visualization
+        self.ue_positions = np.array([[ue.x, ue.y] for ue in self.ues]).T
+        self.ue_heights = np.array([ue.z for ue in self.ues])
+        self.ue_signal_strength = np.array([ue.get_connected_ru_metrics()['rsrp'] for ue in self.ues])
+
+    def visualize_stadium(self):
+        """Visualize the stadium layout with UE distribution and signal strength"""
+        if self.ue_signal_strength is None or self.ue_signal_strength.size == 0:
+            print("No UEs to visualize")
+            return
+
+        plt.figure(figsize=(15, 10))
+
+        # Plot field
+        field_rect = plt.Rectangle((-self.field_length/2, -self.field_width/2),
+                                 self.field_length, self.field_width,
+                                 facecolor='green', alpha=0.5)
+        plt.gca().add_patch(field_rect)
+
+        # Plot technical area
+        tech_area_rect = plt.Rectangle(
+            (-(self.field_length/2 + self.technical_area_width),
+             -(self.field_width/2 + self.technical_area_width)),
+            self.field_length + 2*self.technical_area_width,
+            self.field_width + 2*self.technical_area_width,
+            facecolor='gray', alpha=0.3)
+        plt.gca().add_patch(tech_area_rect)
+
+        # Create custom colormap for signal strength
+        colors = ['red', 'yellow', 'green']
+        n_bins = 100
+        cmap = LinearSegmentedColormap.from_list('signal_strength', colors, N=n_bins)
+
+        # Plot UEs with signal strength color coding and size based on height
+        scatter = plt.scatter(self.ue_positions[0], self.ue_positions[1],
+                            c=self.ue_signal_strength, cmap=cmap,
+                            s=30 + self.ue_heights/2, alpha=0.6,
+                            vmin=0, vmax=-100) # vmin and vmax set by Huff
+
+        # Plot radio units with their IDs and power levels
+        for i, ru in enumerate(self.radio_units):
+            plt.scatter(ru.x, ru.y, marker='^', color='black', s=100)
+            plt.annotate(f'RU{i}\n{ru.tx_power}dBm',
+                        (ru.x, ru.y),
+                        xytext=(5, 5),
+                        textcoords='offset points',
+                        fontsize=8)
+
+        plt.colorbar(scatter, label='Received Signal Power (dBm)')
+        plt.axis('equal')
+        plt.grid(True)
+        plt.title('Stadium Layout with 5G Coverage\n(UMi Street Canyon Model with Shadowing and Multi-tier Structure)')
+        # plt.legend()
+
+        # Add tier information to the plot
+        tier_info = f"Stadium Configuration:\n"
+        for i, tier in enumerate(self.tiers, 1):
+            tier_info += f"Tier {i}: {tier.height}m height, {tier.angle}° angle\n"
+        plt.figtext(0.02, 0.02, tier_info, fontsize=8, bbox=dict(facecolor='white', alpha=0.8))
+
+        plt.show()
+        self.print_coverage_stats()
+
+    def print_coverage_stats(self):
+        """Print detailed statistics about the signal coverage"""
+        if not self.ues:
+            print("No UEs in the simulation")
+            return
+
+        # Calculate statistics based on connected RU metrics
+        metrics = [ue.get_connected_ru_metrics() for ue in self.ues]
+        rsrp_values = [m['rsrp'] for m in metrics]
+        rsrq_values = [m['rsrq'] for m in metrics]
+        sinr_values = [m['sinr'] for m in metrics]
+
+        print("\nCoverage Statistics:")
+        print(f"Total UEs: {self.total_ues}")
+
+        # RSRP categories
+        excellent_signal = np.sum([rsrp > -80 for rsrp in rsrp_values])
+        good_signal = np.sum([(rsrp <= -80) & (rsrp > -90) for rsrp in rsrp_values])
+        medium_signal = np.sum([(rsrp <= -90) & (rsrp > -100) for rsrp in rsrp_values])
+        poor_signal = np.sum([rsrp <= -100 for rsrp in rsrp_values])
+
+        print("\nRSRP Statistics:")
+        print(f"Excellent (>-80 dBm): {excellent_signal/self.total_ues*100:.1f}% of UEs")
+        print(f"Good (-90 to -80 dBm): {good_signal/self.total_ues*100:.1f}% of UEs")
+        print(f"Medium (-100 to -90 dBm): {medium_signal/self.total_ues*100:.1f}% of UEs")
+        print(f"Poor (<-100 dBm): {poor_signal/self.total_ues*100:.1f}% of UEs")
+
+        print("\nAverage Metrics:")
+        print(f"Average RSRP: {np.mean(rsrp_values):.1f} dBm")
+        print(f"Average RSRQ: {np.mean(rsrq_values):.1f} dB")
+        print(f"Average SINR: {np.mean(sinr_values):.1f} dB")
+
+        # Print per-tier statistics
+        print("\nPer-Tier Statistics:")
+        ues_per_tier = self.total_ues // len(self.tiers)
+        for i in range(len(self.tiers)):
+            start_idx = i * ues_per_tier
+            end_idx = (i + 1) * ues_per_tier if i < len(self.tiers) - 1 else self.total_ues
+            tier_ues = self.ues[start_idx:end_idx]
+            tier_metrics = [ue.get_connected_ru_metrics() for ue in tier_ues]
+            tier_rsrp = np.mean([m['rsrp'] for m in tier_metrics])
+            tier_rsrq = np.mean([m['rsrq'] for m in tier_metrics])
+            tier_sinr = np.mean([m['sinr'] for m in tier_metrics])
+            print(f"\nTier {i+1}:")
+            print(f"  Average RSRP: {tier_rsrp:.1f} dBm")
+            print(f"  Average RSRQ: {tier_rsrq:.1f} dB")
+            print(f"  Average SINR: {tier_sinr:.1f} dB")
+
+    def handoff_ue(self, ue_id: int, new_ru_id: int) -> bool:
+        """Handoff a specific UE to a new radio unit"""
+        # Find UE and RU by ID
+        target_ue = next((ue for ue in self.ues if ue.id == ue_id), None)
+        target_ru = next((ru for ru in self.radio_units if ru.id == new_ru_id), None)
+
+        if target_ue is None:
+            print(f"UE with ID {ue_id} not found")
+            return False
+
+        if target_ru is None:
+            print(f"Radio Unit with ID {new_ru_id} not found")
+            return False
+
+        # Perform handoff
+        success = target_ue.force_handoff(target_ru)
+
+        if success:
+            # Recalculate metrics for ALL UEs since interference patterns have changed
+            for ue in self.ues:
+                ue.calculate_signal_metrics(self.radio_units)
+            # Update visualization data
+            self.calculate_signal_strength()
+
+        return success
+
