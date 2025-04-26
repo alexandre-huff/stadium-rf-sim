@@ -29,8 +29,8 @@ class StadiumSimulation:
         self.total_ues = 0
 
         # TODO Things to add/modify in the simulation
-        # Interference only between UEs
         # Add CQI measurement and replace RSRP-based colormap by CQI-based colormap
+        # CQI is defined in GPP TS 38.214 at Section 5.2.2.1, so, which table should be used?
         # Set the number of RUs based on a configuration file
 
         # 5G network parameters
