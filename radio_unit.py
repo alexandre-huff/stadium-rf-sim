@@ -7,7 +7,7 @@ if TYPE_CHECKING:
 class RadioUnit:
     _next_id = 0  # Class variable to track the next available ID
 
-    def __init__(self, x: float, y: float, z: float, tx_power: float = 46):
+    def __init__(self, x: float, y: float, z: float, tx_power: float = 46, channel_frequency: float = 3500, channel_bandwidth: float = 100):
         """Initialize a radio unit
 
         Args:
@@ -15,6 +15,8 @@ class RadioUnit:
             y (float): Y coordinate
             z (float): Z coordinate (height)
             tx_power (float): Transmission power in dBm (default: 46 dBm)
+            channel_frequency (float): Frequency of the channel in MHz
+            channel_bandwidth (float): Bandwidth in MHz
         """
         self.id = RadioUnit._next_id
         RadioUnit._next_id += 1
@@ -22,7 +24,16 @@ class RadioUnit:
         self.y = y
         self.z = z
         self.tx_power = tx_power
+        self.channel_bandwidth = channel_bandwidth  # Bandwidth in MHz
+        self.channel_frequency = channel_frequency  # Frequency in MHz
         self.connected_ues: Set['UE'] = set()  # Set of connected UE objects
+
+    @property
+    def channel_end_freq(self) -> float:
+        """Get the end frequency of the channel in MHz"""
+        if self.channel_frequency is None:
+            return None
+        return self.channel_frequency + self.channel_bandwidth - 1 # Considering the start frequency as inclusive
 
     @property
     def position(self) -> np.ndarray:

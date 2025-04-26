@@ -29,13 +29,13 @@ class StadiumSimulation:
         self.total_ues = 0
 
         # TODO Things to add/modify in the simulation
-        # Each RU must work with a 100Mhz channel (needs to add a channel per RU and increment it by 100Mhz for each added RU)
         # Interference only between UEs
         # Add CQI measurement and replace RSRP-based colormap by CQI-based colormap
         # Set the number of RUs based on a configuration file
 
-        # 5G network parameters (more realistic values)
-        self.frequency = 3.5  # Center frequency in GHz (typical for 5G mid-band)
+        # 5G network parameters
+        self.frequency = 3500  # Starting frequency in MHz (3.5 GHz typical for 5G mid-band)
+        self.channel_bandwidth = 100  # Channel bandwidth in MHz
         self.bs_height = 25   # Height of radio units in meters
         self.ue_height = 1.5  # Height of UEs in meters (when standing)
         self.bs_tx_power = 46 # Radio unit transmission power in dBm
@@ -44,20 +44,23 @@ class StadiumSimulation:
         self.shadow_std_los = 4.0    # Standard deviation for LOS shadow fading
         self.shadow_std_nlos = 7.8   # Standard deviation for NLOS shadow fading
 
-        # Initialize radio units with default power
-        self.radio_units = [
-            RadioUnit(x, y, z, self.bs_tx_power)
-            for x, y, z in [
-                [-self.field_length/2 - 5, -self.field_width/4, self.bs_height],   # West side 1
-                [-self.field_length/2 - 5, self.field_width/4, self.bs_height],    # West side 2
-                [self.field_length/2 + 5, -self.field_width/4, self.bs_height],    # East side 1
-                [self.field_length/2 + 5, self.field_width/4, self.bs_height],     # East side 2
-                [-self.field_length/4, -self.field_width/2 - 5, self.bs_height],   # South side 1
-                [self.field_length/4, -self.field_width/2 - 5, self.bs_height],    # South side 2
-                [-self.field_length/4, self.field_width/2 + 5, self.bs_height],    # North side 1
-                [self.field_length/4, self.field_width/2 + 5, self.bs_height]      # North side 2
-            ]
+        # Initialize radio units with default power and incrementing channels
+        ru_positions = [
+            [-self.field_length/2 - 5, -self.field_width/4, self.bs_height],   # West side 1
+            [-self.field_length/2 - 5, self.field_width/4, self.bs_height],    # West side 2
+            [self.field_length/2 + 5, -self.field_width/4, self.bs_height],    # East side 1
+            [self.field_length/2 + 5, self.field_width/4, self.bs_height],     # East side 2
+            [-self.field_length/4, -self.field_width/2 - 5, self.bs_height],   # South side 1
+            [self.field_length/4, -self.field_width/2 - 5, self.bs_height],    # South side 2
+            [-self.field_length/4, self.field_width/2 + 5, self.bs_height],    # North side 1
+            [self.field_length/4, self.field_width/2 + 5, self.bs_height]      # North side 2
         ]
+
+        self.radio_units = []
+        for i, (x, y, z) in enumerate(ru_positions):
+            # Calculate channel start frequency for this RU
+            channel_frequency = self.frequency + (i * self.channel_bandwidth)
+            self.radio_units.append(RadioUnit(x, y, z, self.bs_tx_power, channel_frequency, self.channel_bandwidth))
 
         self.ues: List[UE] = []  # List to store UE objects
 
@@ -205,10 +208,10 @@ class StadiumSimulation:
                             s=30 + self.ue_heights/2, alpha=0.6,
                             vmin=0, vmax=-100) # vmin and vmax set by Huff
 
-        # Plot radio units with their IDs and power levels
+        # Plot radio units with their IDs, power levels, and channel info
         for i, ru in enumerate(self.radio_units):
             plt.scatter(ru.x, ru.y, marker='^', color='black', s=100)
-            plt.annotate(f'RU{i}\n{ru.tx_power}dBm',
+            plt.annotate(f'RU{i}\n{ru.tx_power}dBm\n{ru.channel_frequency}-{ru.channel_end_freq}MHz',
                         (ru.x, ru.y),
                         xytext=(5, 5),
                         textcoords='offset points',
