@@ -1,5 +1,4 @@
 import numpy as np
-import uuid
 from typing import Optional, List, Dict
 from radio_unit import RadioUnit
 
@@ -126,7 +125,7 @@ class UE:
             return False
 
         if new_ru == self.connected_ru:
-            print(f"UE {self.id} is already connected to RU {new_ru.id}")
+            print(f"\nUE {self.id} is already connected to RU {new_ru.id}\n")
             return False
 
         # Remove UE from current radio unit
@@ -141,7 +140,7 @@ class UE:
         self.connected_ru = new_ru
         new_ru.add_connected_ue(self)
 
-        print(f"UE {self.id} handed off from RU {old_ru.id if old_ru else 'None'} to RU {new_ru.id}")
+        print(f"\nUE {self.id} handed off from RU {old_ru.id if old_ru else 'None'} to RU {new_ru.id}\n")
         print(f"New RSRP: {self.rsrp_measurements[new_ru]:.1f} dBm")
         print(f"New RSRQ: {self.rsrq_measurements[new_ru]:.1f} dB")
         print(f"New SINR: {self.sinr_measurements[new_ru]:.1f} dB")

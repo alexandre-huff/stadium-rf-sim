@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-from typing import List, Dict
+from typing import List
 from stadium_tier import StadiumTier
 from radio_unit import RadioUnit
 from user_equipment import UE
@@ -123,9 +123,6 @@ class StadiumSimulation:
         # Update total UE count
         self.total_ues += num_new_ues
 
-        # Calculate signal strength for visualization
-        self.calculate_signal_strength()
-
         print(f"Successfully added {num_new_ues} new UEs. Total UEs: {self.total_ues}")
 
     def generate_ue_positions(self):
@@ -154,28 +151,18 @@ class StadiumSimulation:
             raise ValueError(f"Invalid radio unit index: {ru_idx}")
 
         self.radio_units[ru_idx].set_tx_power(power)
-        # Recalculate signal metrics for all UEs
-        for ue in self.ues:
-            ue.calculate_signal_metrics(self.radio_units)
-        # Update visualization data
-        self.calculate_signal_strength()
-
-    def calculate_signal_strength(self):
-        """Calculate received signal strength for all UEs from all radio units"""
-        if not self.ues:
-            return
-
-        # Update signal metrics for all UEs
-        for ue in self.ues:
+        # Recalculate signal metrics for all UEs connected on this RU and only
+        # compute for this RU since signal power of the other RUs did not change.
+        for ue in self.radio_units[ru_idx].connected_ues:
             ue.calculate_signal_metrics(self.radio_units)
 
+    def visualize_stadium(self):
+        """Visualize the stadium layout with UE distribution and signal strength"""
         # Store data for visualization
         self.ue_positions = np.array([[ue.x, ue.y] for ue in self.ues]).T
         self.ue_heights = np.array([ue.z for ue in self.ues])
         self.ue_signal_strength = np.array([ue.get_connected_ru_metrics()['rsrp'] for ue in self.ues])
 
-    def visualize_stadium(self):
-        """Visualize the stadium layout with UE distribution and signal strength"""
         if self.ue_signal_strength is None or self.ue_signal_strength.size == 0:
             print("No UEs to visualize")
             return
@@ -217,7 +204,7 @@ class StadiumSimulation:
                         textcoords='offset points',
                         fontsize=8)
 
-        plt.colorbar(scatter, label='Received Signal Power (dBm)')
+        plt.colorbar(scatter, label='Reference Signal Received Power (dBm)')
         plt.axis('equal')
         plt.grid(True)
         plt.title('Stadium Layout with 5G Coverage\n(UMi Street Canyon Model with Shadowing and Multi-tier Structure)')
@@ -301,8 +288,6 @@ class StadiumSimulation:
             # Recalculate metrics for ALL UEs since interference patterns have changed
             for ue in self.ues:
                 ue.calculate_signal_metrics(self.radio_units)
-            # Update visualization data
-            self.calculate_signal_strength()
 
         return success
 
