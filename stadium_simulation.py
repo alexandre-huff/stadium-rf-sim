@@ -56,7 +56,7 @@ class StadiumSimulation:
             [self.field_length/4, self.field_width/2 + 5, self.bs_height]      # North side 2
         ]
 
-        self.radio_units = []
+        self.radio_units: List[RadioUnit] = []
         for i, (x, y, z) in enumerate(ru_positions):
             # Calculate channel start frequency for this RU
             channel_frequency = self.frequency + (i * self.channel_bandwidth)
@@ -68,11 +68,13 @@ class StadiumSimulation:
         """Get the list of UEs in the simulation"""
         return self.ues
 
-    def add_ues(self, num_new_ues):
+    def add_ues(self, num_ues) -> list:
         """Add a specified number of new UEs to the stadium simulation"""
-        if num_new_ues <= 0:
+        added_ues = []
+
+        if num_ues <= 0:
             print("Number of new UEs must be positive")
-            return
+            return added_ues
 
         # Generate positions for new UEs
         x_positions = []
@@ -80,8 +82,8 @@ class StadiumSimulation:
         z_positions = []
 
         # Distribute new UEs evenly across tiers
-        ues_per_tier = num_new_ues // len(self.tiers)
-        remaining_ues = num_new_ues % len(self.tiers)
+        ues_per_tier = num_ues // len(self.tiers)
+        remaining_ues = num_ues % len(self.tiers)
 
         for tier_idx, tier in enumerate(self.tiers):
             # Add extra UE to this tier if we have remaining ones
@@ -119,11 +121,54 @@ class StadiumSimulation:
             ue = UE(x_positions[i], y_positions[i], z_positions[i] + self.ue_height)
             ue.calculate_signal_metrics(self.radio_units)
             self.ues.append(ue)
+            added_ues.append(ue)
 
         # Update total UE count
-        self.total_ues += num_new_ues
+        self.total_ues += num_ues
 
-        print(f"Successfully added {num_new_ues} new UEs. Total UEs: {self.total_ues}")
+        print(f"Successfully added {num_ues} new UEs. Total UEs: {self.total_ues}")
+
+        return added_ues
+
+    def remove_ues(self, num_ues: int) -> list:
+        """Remove a specified number of UEs from the stadium simulation.
+
+        Args:
+            num_ues (int): The number of UEs to remove from the simulation
+
+        Returns:
+            int: The actual number of UEs removed
+        """
+        removed_ues = []
+
+        if num_ues <= 0:
+            print("Number of UEs to remove must be positive")
+            return removed_ues
+
+        if num_ues > self.total_ues:
+            print(f"Cannot remove {num_ues} UEs: only {self.total_ues} UEs exist")
+            num_ues = self.total_ues
+
+        # Randomly select UEs to remove
+        indices_to_remove = np.random.choice(len(self.ues), num_ues, replace=False)
+
+        # Remove UEs from their connected RUs first
+        for idx in sorted(indices_to_remove, reverse=True):
+            ue = self.ues[idx]
+            # Find and remove UE from its connected RU
+            for ru in self.radio_units:
+                if ue in ru.connected_ues:
+                    ru.connected_ues.remove(ue)
+            # Remove UE from simulation
+            self.ues.pop(idx)
+            removed_ues.append(ue)
+
+        # Update total UE count
+        self.total_ues -= num_ues
+
+        print(f"Successfully removed {num_ues} UEs. Total UEs remaining: {self.total_ues}")
+
+        return removed_ues
 
     def generate_ue_positions(self):
         """Generate uniformly distributed UE positions in the multi-tier stands"""
@@ -155,6 +200,7 @@ class StadiumSimulation:
         # compute for this RU since signal power of the other RUs did not change.
         for ue in self.radio_units[ru_idx].connected_ues:
             ue.calculate_signal_metrics(self.radio_units)
+            # FIXME send update metrics message from here???
 
     def visualize_stadium(self):
         """Visualize the stadium layout with UE distribution and signal strength"""
@@ -198,7 +244,7 @@ class StadiumSimulation:
         # Plot radio units with their IDs, power levels, and channel info
         for i, ru in enumerate(self.radio_units):
             plt.scatter(ru.x, ru.y, marker='^', color='black', s=100)
-            plt.annotate(f'RU{i}\n{ru.tx_power}dBm\n{ru.channel_frequency}-{ru.channel_end_freq}MHz',
+            plt.annotate(f'RU{i}(Cell{i})\n{ru.tx_power}dBm\n{ru.channel_frequency}-{ru.channel_end_freq}MHz',
                         (ru.x, ru.y),
                         xytext=(5, 5),
                         textcoords='offset points',
@@ -267,27 +313,40 @@ class StadiumSimulation:
             print(f"  Average RSRQ: {tier_rsrq:.1f} dB")
             print(f"  Average SINR: {tier_sinr:.1f} dB")
 
-    def handoff_ue(self, ue_id: int, new_ru_id: int) -> bool:
-        """Handoff a specific UE to a new radio unit"""
+    def handoff_ue(self, ue_id: str, new_cell_id: int) -> tuple[bool, List[UE]]:
+        """Handoff a specific UE to a new cell/radio unit"""
         # Find UE and RU by ID
-        target_ue = next((ue for ue in self.ues if ue.id == ue_id), None)
-        target_ru = next((ru for ru in self.radio_units if ru.id == new_ru_id), None)
+        target_ue = next((ue for ue in self.ues if ue.imsi == ue_id), None)
+        target_cell = next((ru for ru in self.radio_units if ru.pci == new_cell_id), None)
 
         if target_ue is None:
             print(f"UE with ID {ue_id} not found")
             return False
 
-        if target_ru is None:
-            print(f"Radio Unit with ID {new_ru_id} not found")
+        if target_cell is None:
+            print(f"Target Cell with ID {new_cell_id} not found")
             return False
 
+        # Getting previous cell to recalculate metrics from its UEs after performing the handover
+        old_cell = target_ue.connected_ru
+
         # Perform handoff
-        success = target_ue.force_handoff(target_ru)
+        success = target_ue.force_handoff(target_cell)
 
+        metric_ues: List[UE] = []
         if success:
-            # Recalculate metrics for ALL UEs since interference patterns have changed
-            for ue in self.ues:
+            # Recalculate metrics for all UEs on previous cell since interference patterns have changed
+            for ue in old_cell.connected_ues:
                 ue.calculate_signal_metrics(self.radio_units)
+                metric_ues.append(ue)
 
-        return success
+            # Recalculate metrics for all UEs on target cell since interference patterns have changed
+            for ue in target_cell.connected_ues:
+                ue.calculate_signal_metrics(self.radio_units)
+                metric_ues.append(ue)
 
+            # Recalculate metrics for ALL UEs since interference patterns have changed
+            # for ue in self.ues:
+            #     ue.calculate_signal_metrics(self.radio_units)
+
+        return success, metric_ues

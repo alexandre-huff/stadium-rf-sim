@@ -5,7 +5,7 @@ if TYPE_CHECKING:
     from user_equipment import UE
 
 class RadioUnit:
-    _next_id = 0  # Class variable to track the next available ID
+    _next_id = 0  # Class variable to track the next available Cell ID
 
     def __init__(self, x: float, y: float, z: float, tx_power: float = 46, channel_frequency: float = 3500, channel_bandwidth: float = 100):
         """Initialize a radio unit
@@ -18,7 +18,7 @@ class RadioUnit:
             channel_frequency (float): Frequency of the channel in MHz
             channel_bandwidth (float): Bandwidth in MHz
         """
-        self.id = RadioUnit._next_id
+        self.pci = RadioUnit._next_id # Each RadioUnit manages a single cell identified as the Physical Cell ID (pci)
         RadioUnit._next_id += 1
         self.x = x
         self.y = y

@@ -2,12 +2,17 @@ import numpy as np
 from typing import Optional, List, Dict
 from radio_unit import RadioUnit
 
+MCC = "001"
+MNC = "001"
+
 class UE:
     _next_id = 0  # Class variable to track the next available ID
 
     def __init__(self, x: float, y: float, z: float):
-        self.id = UE._next_id
+        msin = str(UE._next_id)
         UE._next_id += 1
+        msin = msin.zfill(15 - len(MCC) - len(MNC))
+        self.imsi = MCC + MNC + msin
         self.x = x
         self.y = y
         self.z = z
@@ -51,7 +56,7 @@ class UE:
             # Get all UEs connected to this RU (except self)
             interfering_ues = [ue for ue in ru.connected_ues if ue != self]
             # Sum up power from all interfering UEs
-            interference_power = sum(10**(rsrp_values[ru]/10) for ue in interfering_ues)
+            interference_power = sum(10**(rsrp_values[ru]/10) for ue in interfering_ues)    # FIXME Check why ue is not used in for loop
             # Add noise floor
             rssi = 10 * np.log10(interference_power + 10**(noise_floor/10)) if interfering_ues else noise_floor
             rssi_values[ru] = rssi
@@ -121,28 +126,35 @@ class UE:
             bool: True if handoff was successful, False otherwise
         """
         if new_ru not in self.rsrp_measurements:
-            print(f"Invalid radio unit: {new_ru.id}")
+            print(f"Invalid radio unit: {new_ru.pci}")
             return False
 
         if new_ru == self.connected_ru:
-            print(f"\nUE {self.id} is already connected to RU {new_ru.id}\n")
-            return False
+            print(f"UE {self.imsi} is already connected on RU {new_ru.pci}")
+            return True
 
         # Remove UE from current radio unit
-        if self.connected_ru is not None:
-            print(f"Old RSRP: {self.rsrp_measurements[self.connected_ru]:.1f} dBm")
-            print(f"Old RSRQ: {self.rsrq_measurements[self.connected_ru]:.1f} dB")
-            print(f"Old SINR: {self.sinr_measurements[self.connected_ru]:.1f} dB")
-            self.connected_ru.remove_connected_ue(self)
+        # if self.connected_ru is not None:
+            # print(f"Old measurements {{RSRP: \"{self.rsrp_measurements[self.connected_ru]:.1f} dBm\",",
+                #   f"RSRQ: \"{self.rsrq_measurements[self.connected_ru]:.1f} dB\", SINR: \"{self.sinr_measurements[self.connected_ru]:.1f} dB\"}}")
+            # print(f"Old RSRP: {self.rsrp_measurements[self.connected_ru]:.1f} dBm")
+            # print(f"Old RSRQ: {self.rsrq_measurements[self.connected_ru]:.1f} dB")
+            # print(f"Old SINR: {self.sinr_measurements[self.connected_ru]:.1f} dB")
+            # self.connected_ru.remove_connected_ue(self)
 
         # Update connection
+        self.connected_ru.remove_connected_ue(self)
         old_ru = self.connected_ru
         self.connected_ru = new_ru
-        new_ru.add_connected_ue(self)
+        self.connected_ru.add_connected_ue(self)
 
-        print(f"\nUE {self.id} handed off from RU {old_ru.id if old_ru else 'None'} to RU {new_ru.id}\n")
-        print(f"New RSRP: {self.rsrp_measurements[new_ru]:.1f} dBm")
-        print(f"New RSRQ: {self.rsrq_measurements[new_ru]:.1f} dB")
-        print(f"New SINR: {self.sinr_measurements[new_ru]:.1f} dB")
+        print(f"UE {self.imsi} handed off from RU {old_ru.pci} to RU {new_ru.pci}")
+        print(f"Old measurements {{RSRP: \"{self.rsrp_measurements[old_ru]:.1f} dBm\",",
+              f"RSRQ: \"{self.rsrq_measurements[old_ru]:.1f} dB\", SINR: \"{self.sinr_measurements[old_ru]:.1f} dB\"}}")
+        print(f"New measurements {{RSRP: \"{self.rsrp_measurements[new_ru]:.1f} dBm\",",
+              f"RSRQ: \"{self.rsrq_measurements[new_ru]:.1f} dB\", SINR: \"{self.sinr_measurements[new_ru]:.1f} dB\"}}")
+        # print(f"New RSRP: {self.rsrp_measurements[new_ru]:.1f} dBm")
+        # print(f"New RSRQ: {self.rsrq_measurements[new_ru]:.1f} dB")
+        # print(f"New SINR: {self.sinr_measurements[new_ru]:.1f} dB")
 
         return True
