@@ -66,9 +66,7 @@ class Ofh:
             msg_type = msg.WhichOneof('type')
             match msg_type:
                 case "registration_response":
-                    if msg.registration_response.status == True:    # FIXME change this to False again and show only the message on error
-                        print("All UEs have been registered in E2Sim")
-                    else:
+                    if msg.registration_response.status == False:
                         print("E2Sim was unable to register all UEs")
 
                 case "deregistration_response":
@@ -115,6 +113,26 @@ class Ofh:
                         print("RU Tear Down has completed on gNodeB")
                     else:
                         print("Unable to fully Tear Down RU on gNodeB")
+
+                case "tx_reference_level_request":
+                    print("Received TX Reference Level Request Message")
+                    pci = msg.tx_reference_level_request.cell.pci
+                    gain = msg.tx_reference_level_request.cell.gain
+                    print(f"Updating TX Reference Level for Cell pci={pci} to {gain} dBm")
+                    status, ue_list = self.__sim.set_ru_power(pci, gain)
+                    response = pb.OfhMessage()
+                    response.tx_reference_level_response.cell.pci = pci
+                    response.tx_reference_level_response.cell.gain = gain
+                    response.tx_reference_level_response.status = status
+                    if status == False:
+                        response.tx_reference_level_response.error = f"Unable updating TX Reference Level for Cell pci={pci}"
+
+                    self.send(response)
+
+                     # Send updated metrics after updating TX Reference Level from all UEs on that cell
+                    if status == True:
+                        message = self.create_metrics_request(ue_list)
+                        self.send(message)
 
                 case _:
                     if msg_type is not None:

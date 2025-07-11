@@ -7,14 +7,14 @@ if TYPE_CHECKING:
 class RadioUnit:
     _next_id = 0  # Class variable to track the next available Cell ID
 
-    def __init__(self, x: float, y: float, z: float, tx_power: float = 46, channel_frequency: float = 3500, channel_bandwidth: float = 100):
+    def __init__(self, x: float, y: float, z: float, tx_power: float = 20, channel_frequency: float = 3500, channel_bandwidth: float = 100):
         """Initialize a radio unit
 
         Args:
             x (float): X coordinate
             y (float): Y coordinate
             z (float): Z coordinate (height)
-            tx_power (float): Transmission power in dBm (default: 46 dBm)
+            tx_power (float): Transmission power in dBm (default: 20 dBm)
             channel_frequency (float): Frequency of the channel in MHz
             channel_bandwidth (float): Bandwidth in MHz
         """

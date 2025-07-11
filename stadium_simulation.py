@@ -38,7 +38,7 @@ class StadiumSimulation:
         self.channel_bandwidth = 100  # Channel bandwidth in MHz
         self.bs_height = 25   # Height of radio units in meters
         self.ue_height = 1.5  # Height of UEs in meters (when standing)
-        self.bs_tx_power = 46 # Radio unit transmission power in dBm
+        self.bs_tx_power = 20 # Radio unit transmission power in dBm
 
         # Shadow fading parameters
         self.shadow_std_los = 4.0    # Standard deviation for LOS shadow fading
@@ -126,7 +126,7 @@ class StadiumSimulation:
         # Update total UE count
         self.total_ues += num_ues
 
-        print(f"Successfully added {num_ues} new UEs. Total UEs: {self.total_ues}")
+        print(f"Successfully added {num_ues} new UEs. Current UEs: {self.total_ues}")
 
         return added_ues
 
@@ -166,7 +166,7 @@ class StadiumSimulation:
         # Update total UE count
         self.total_ues -= num_ues
 
-        print(f"Successfully removed {num_ues} UEs. Total UEs remaining: {self.total_ues}")
+        print(f"Successfully removed {num_ues} UEs. Current UEs: {self.total_ues}")
 
         return removed_ues
 
@@ -190,17 +190,21 @@ class StadiumSimulation:
 
         return is_within_bounds and is_outside_technical
 
-    def set_ru_power(self, ru_idx: int, power: float):
+    def set_ru_power(self, ru_idx: int, power: float) -> tuple[bool, List[UE]]:
         """Set the transmission power of a specific radio unit"""
         if ru_idx < 0 or ru_idx >= len(self.radio_units):
-            raise ValueError(f"Invalid radio unit index: {ru_idx}")
+            print(f"Invalid radio unit index: {ru_idx}")
+            return False, []
 
         self.radio_units[ru_idx].set_tx_power(power)
         # Recalculate signal metrics for all UEs connected on this RU and only
         # compute for this RU since signal power of the other RUs did not change.
+        metric_ues: List[UE] = []
         for ue in self.radio_units[ru_idx].connected_ues:
             ue.calculate_signal_metrics(self.radio_units)
-            # FIXME send update metrics message from here???
+            metric_ues.append(ue)
+
+        return True, metric_ues
 
     def visualize_stadium(self):
         """Visualize the stadium layout with UE distribution and signal strength"""
@@ -321,11 +325,11 @@ class StadiumSimulation:
 
         if target_ue is None:
             print(f"UE with ID {ue_id} not found")
-            return False
+            return False, []
 
         if target_cell is None:
             print(f"Target Cell with ID {new_cell_id} not found")
-            return False
+            return False, []
 
         # Getting previous cell to recalculate metrics from its UEs after performing the handover
         old_cell = target_ue.connected_ru
