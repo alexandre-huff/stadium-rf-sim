@@ -22,59 +22,98 @@ class UE:
         self.sinr_measurements: Dict[RadioUnit, float] = {}  # RU -> SINR
 
     def calculate_signal_metrics(self, radio_units: List[RadioUnit]):
-        """Calculate RSRP, RSRQ, and SINR for all radio units
-
+        """Calculate RSRP, RSRQ, and SINR for all radio units according to 3GPP standards
+        
         Args:
             radio_units: List of radio units to calculate metrics for
         """
         # Calculate thermal noise floor based on channel bandwidth
-        # The noise floor value of -174 dBm is a fundamental physical constant derived
-        # from thermal noise in wireless communications.
-        thermal_noise_density = -174  # dBm/Hz at room temperature of 290K (16.85 Celsius)
-        # Add bandwidth factor for connected RU's channel bandwidth (1000000 Hz = 1 MHz)
-        noise_floor = thermal_noise_density + 10 * np.log10(self.connected_ru.channel_bandwidth * 1000000) \
-            if self.connected_ru else thermal_noise_density  # -94 dBm for 100MHz
-
+        # 3GPP TS 36.101: -174 dBm/Hz is the thermal noise density
+        thermal_noise_density = -174  # dBm/Hz at 290K
+        
+        # Calculate noise floor for the bandwidth
+        if self.connected_ru:
+            # Convert bandwidth from MHz to Hz
+            bandwidth_hz = self.connected_ru.channel_bandwidth * 1e6
+            noise_floor = thermal_noise_density + 10 * np.log10(bandwidth_hz)
+            # Number of resource blocks (assuming 180 kHz per RB for LTE)
+            num_rb = int(self.connected_ru.channel_bandwidth * 1e6 / 180e3)
+        else:
+            noise_floor = thermal_noise_density + 60  # Default 1 MHz
+            num_rb = 5  # Default 5 RBs
+        
         # Calculate distances to all radio units
         distances = {ru: np.sqrt(
             (ru.x - self.x)**2 +
             (ru.y - self.y)**2 +
             (ru.z - self.z)**2
         ) for ru in radio_units}
-
-        # Calculate path loss for all radio units using their specific frequencies (in GHz)
-        path_losses = {ru: 21 * np.log10(dist) + 20 * np.log10(ru.channel_frequency/1000) + 32.4
-                      for ru, dist in distances.items()}
-
+        
+        # Calculate path loss using 3GPP Urban Macro model (simplified)
+        # TR 38.901 Table 7.4.1-1 for UMa-LOS
+        path_losses = {}
+        for ru, dist in distances.items():
+            freq_ghz = ru.channel_frequency / 1000
+            if dist < 10:  # Minimum distance
+                dist = 10
+            # Simplified UMa path loss model
+            pl = 28.0 + 22 * np.log10(dist) + 20 * np.log10(freq_ghz)
+            path_losses[ru] = pl
+        
         # Calculate RSRP for all radio units
-        rsrp_values = {ru: ru.tx_power - path_losses[ru] for ru in radio_units}
+        # RSRP is measured on reference signals, not total power
+        # Assuming reference signal power is 3dB below total power
+        rs_power_offset = -3  # dB
+        rsrp_values = {ru: ru.tx_power + rs_power_offset - path_losses[ru] 
+                       for ru in radio_units}
         self.rsrp_measurements = rsrp_values
-
-        # Calculate RSSI per radio unit (considering only UEs on same channel)
+        
+        # Calculate RSSI per radio unit (total received power)
         rssi_values = {}
         for ru in radio_units:
-            # Get all UEs connected to this RU (except self)
-            interfering_ues = [ue for ue in ru.connected_ues if ue != self]
-            # Sum up power from all interfering UEs
-            interference_power = sum(10**(rsrp_values[ru]/10) for ue in interfering_ues)    # FIXME Check why ue is not used in for loop
-            # Add noise floor
-            rssi = 10 * np.log10(interference_power + 10**(noise_floor/10)) if interfering_ues else noise_floor
-            rssi_values[ru] = rssi
-
-        # Calculate RSRQ for all radio units using per-RU RSSI
-        self.rsrq_measurements = {ru: rsrp - rssi + 30
-                                for ru, (rsrp, rssi) in
-                                ((ru, (rsrp_values[ru], rssi_values[ru]))
-                                 for ru in radio_units)}
-
+            # RSSI includes power from all sources on the carrier
+            total_power_linear = 0
+            
+            # Power from the RU itself
+            ru_power_linear = 10**(rsrp_values[ru]/10)
+            total_power_linear += ru_power_linear
+            
+            # Interference from all other RUs on same frequency
+            for other_ru in radio_units:
+                if other_ru != ru and other_ru.channel_frequency == ru.channel_frequency:
+                    interference_power = other_ru.tx_power - path_losses[other_ru]
+                    total_power_linear += 10**(interference_power/10)
+            
+            # Add thermal noise
+            total_power_linear += 10**(noise_floor/10)
+            
+            rssi_values[ru] = 10 * np.log10(total_power_linear)
+        
+        # Calculate RSRQ according to 3GPP formula
+        # RSRQ = N × RSRP / RSSI (in linear scale, then convert to dB)
+        self.rsrq_measurements = {}
+        for ru in radio_units:
+            rsrp_linear = 10**(rsrp_values[ru]/10)
+            rssi_linear = 10**(rssi_values[ru]/10)
+            rsrq_linear = num_rb * rsrp_linear / rssi_linear
+            self.rsrq_measurements[ru] = 10 * np.log10(rsrq_linear)
+        
         # Calculate SINR for all radio units
         for ru in radio_units:
-            target_power = 10**(rsrp_values[ru]/10)
-            # Only consider interference from UEs on the same RU
-            interference_power = sum(10**(rsrp_values[ru]/10)
-                                  for ue in ru.connected_ues if ue != self)
+            signal_power = 10**(rsrp_values[ru]/10)
+            
+            # Calculate interference from all other RUs on same frequency
+            interference_power = 0
+            for other_ru in radio_units:
+                if other_ru != ru and other_ru.channel_frequency == ru.channel_frequency:
+                    interf_rsrp = other_ru.tx_power - path_losses[other_ru]
+                    interference_power += 10**(interf_rsrp/10)
+            
+            # Add thermal noise
             noise_power = 10**(noise_floor/10)
-            sinr = 10 * np.log10(target_power / (interference_power + noise_power))
+            
+            # SINR calculation
+            sinr = 10 * np.log10(signal_power / (interference_power + noise_power))
             self.sinr_measurements[ru] = sinr
 
         if self.connected_ru is None: # Huff: avoids the UE to always connect to the RU with the highest RSRP, enabling handover
