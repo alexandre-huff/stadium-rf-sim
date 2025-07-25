@@ -27,16 +27,22 @@ class Client:
         size = message.ByteSize()
 
         data_len = size.to_bytes(4, byteorder='big')    # converting to network byte order
-        sent = self.sock.send(data_len)
-        if sent == 0:
-            raise RuntimeError("socket connection broken")
+        try:
+            sent = self.sock.send(data_len)
+            if sent == 0:
+                raise RuntimeError("socket connection broken")
+        except BrokenPipeError as e:
+            raise RuntimeError(f"{e}. socket connection broken")
 
         total_sent = 0
         while total_sent < size:
-            sent = self.sock.send(data[total_sent:])
-            if sent == 0:
-                raise RuntimeError("socket connection broken")
-            total_sent += sent
+            try:
+                sent = self.sock.send(data[total_sent:])
+                if sent == 0:
+                    raise RuntimeError("socket connection broken")
+                total_sent += sent
+            except BrokenPipeError as e:
+                raise RuntimeError(f"{e}. socket connection broken")
 
     def receive(self) -> pb.OfhMessage:
         """Receive a message from the server
@@ -66,8 +72,11 @@ class Client:
         return msg
 
     def disconnect(self):
-        self.sock.shutdown(socket.SHUT_WR)
-        self.sock.close()
+        try:
+            self.sock.shutdown(socket.SHUT_WR)
+            self.sock.close()
+        except OSError as e:
+            print(e)
 
 
 if __name__ == "__main__":
