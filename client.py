@@ -1,3 +1,19 @@
+# ==================================================================================
+# Copyright 2025 Alexandre Huff.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==================================================================================
+
 import socket
 import proto.signaling_pb2 as pb
 from google.protobuf import message, text_format
@@ -27,16 +43,22 @@ class Client:
         size = message.ByteSize()
 
         data_len = size.to_bytes(4, byteorder='big')    # converting to network byte order
-        sent = self.sock.send(data_len)
-        if sent == 0:
-            raise RuntimeError("socket connection broken")
+        try:
+            sent = self.sock.send(data_len)
+            if sent == 0:
+                raise RuntimeError("socket connection broken")
+        except BrokenPipeError as e:
+            raise RuntimeError(f"{e}. socket connection broken")
 
         total_sent = 0
         while total_sent < size:
-            sent = self.sock.send(data[total_sent:])
-            if sent == 0:
-                raise RuntimeError("socket connection broken")
-            total_sent += sent
+            try:
+                sent = self.sock.send(data[total_sent:])
+                if sent == 0:
+                    raise RuntimeError("socket connection broken")
+                total_sent += sent
+            except BrokenPipeError as e:
+                raise RuntimeError(f"{e}. socket connection broken")
 
     def receive(self) -> pb.OfhMessage:
         """Receive a message from the server
@@ -66,8 +88,11 @@ class Client:
         return msg
 
     def disconnect(self):
-        self.sock.shutdown(socket.SHUT_WR)
-        self.sock.close()
+        try:
+            self.sock.shutdown(socket.SHUT_WR)
+            self.sock.close()
+        except OSError as e:
+            print(e)
 
 
 if __name__ == "__main__":

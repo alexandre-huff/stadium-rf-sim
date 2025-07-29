@@ -1,3 +1,19 @@
+# ==================================================================================
+# Copyright 2025 Alexandre Huff.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==================================================================================
+
 from stadium_simulation import StadiumSimulation
 import proto.signaling_pb2 as pb
 from ofh import Ofh
@@ -109,6 +125,9 @@ def run_experiment(addr: str):
                 step_sleep = sleep_time / steps
                 step_sign = 1 if ue_difference > 0 else -1
                 for _ in range(steps):
+                    print(f"Time: {row['Time(h)']}h, Interval: {step_sleep:.3f}s")
+                    time.sleep(step_sleep)
+
                     if step_sign > 0:
                         added_ues = sim.add_ues(1)
                         if added_ues:
@@ -121,9 +140,9 @@ def run_experiment(addr: str):
                             ue_dereg_msg = ofh.create_ue_deregistration_request(removed_ues)
                             ofh.send(ue_dereg_msg)
                         current_ues -= 1
-                    print(f"Time: {row['Time(h)']}h, Interval: {step_sleep:.3f}s")
-                    time.sleep(step_sleep)
             else:
+                print(f"Time: {row['Time(h)']}h, Interval: {sleep_time:.3f}s")
+
                 # No time interval or no UE change, just sleep if needed
                 if sleep_time > 0:
                     time.sleep(sleep_time)
@@ -140,12 +159,14 @@ def run_experiment(addr: str):
                         ue_dereg_msg = ofh.create_ue_deregistration_request(removed_ues)
                         ofh.send(ue_dereg_msg)
                     current_ues += ue_difference
-                print(f"Time: {row['Time(h)']}h")
             last_time = row['Time(s)']
     except KeyboardInterrupt:
         print("\nExperiment interrupted by user\n")
     except SystemExit as e:
         print(f"\n{e} Shutting down...\n")
+    except RuntimeError as e:
+        print(f"\nRuntime Error: {e}\n")
+        current_ues = 0
     finally:
         # Clean up
         if current_ues > 0:
@@ -155,10 +176,16 @@ def run_experiment(addr: str):
             removed_ues = sim.remove_ues(current_ues)
             if removed_ues:
                 ue_dereg_msg = ofh.create_ue_deregistration_request(removed_ues)
-                ofh.send(ue_dereg_msg)
+                try:
+                    ofh.send(ue_dereg_msg)
+                    time.sleep(2)  # Give time for final messages to be processed
+                except RuntimeError as e:
+                    print(f"\nRuntime Error: {e}\n")
 
-        time.sleep(2)  # Give time for final messages to be processed
-        ofh.stop()
+        try:
+            ofh.stop()
+        except:
+            os._exit(1)
 
 def signal_handler(sig, frame):
     raise(SystemExit(f"{signal.Signals(sig).name} was received."))
