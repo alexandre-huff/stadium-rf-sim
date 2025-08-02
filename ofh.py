@@ -20,6 +20,8 @@ from stadium_simulation import StadiumSimulation
 from user_equipment import UE
 from typing import List
 from time import sleep
+import csv
+import time
 
 import proto.signaling_pb2 as pb
 
@@ -30,6 +32,11 @@ class Ofh:
         self.__addr = addr
         self.__port = port
         self.__sim = sim
+        
+        # Initialize CSV logging for power changes
+        self.__power_log_file = "cell_power_changes.csv"
+        self.__experiment_start_time = time.time()
+        self.__init_power_log_csv()
 
     def run(self) -> bool:
         """Starts up the OFH client to interact with E2Sim
@@ -70,6 +77,34 @@ class Ofh:
         self.__ok2run = False
         self.__client.disconnect()
         self.__listener.join()
+
+    def __init_power_log_csv(self):
+        """Initialize the CSV file for logging cell power changes"""
+        try:
+            with open(self.__power_log_file, 'w', newline='') as csvfile:
+                fieldnames = ['Time(h)', 'cell_pci', 'power_dbm']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+        except Exception as e:
+            print(f"Warning: Unable to initialize power log CSV: {e}")
+
+    def __log_power_change(self, pci: int, power_dbm: float):
+        """Log a power change event to CSV file"""
+        try:
+            current_time = time.time()
+            elapsed_time_seconds = current_time - self.__experiment_start_time
+            elapsed_time_hours = elapsed_time_seconds / 3600.0  # Convert to hours
+            
+            with open(self.__power_log_file, 'a', newline='') as csvfile:
+                fieldnames = ['Time(h)', 'cell_pci', 'power_dbm']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writerow({
+                    'Time(h)': elapsed_time_hours,
+                    'cell_pci': pci,
+                    'power_dbm': power_dbm
+                })
+        except Exception as e:
+            print(f"Warning: Unable to log power change to CSV: {e}")
 
     def send(self, message: pb.OfhMessage):
         self.__client.send(message)
@@ -136,6 +171,11 @@ class Ofh:
                     gain = msg.tx_reference_level_request.cell.gain
                     print(f"Updating TX Reference Level for Cell pci={pci} to {gain} dBm")
                     status, ue_list = self.__sim.set_ru_power(pci, gain)
+                    
+                    # Log the power change to CSV
+                    if status:
+                        self.__log_power_change(pci, gain)
+                    
                     response = pb.OfhMessage()
                     response.tx_reference_level_response.cell.pci = pci
                     response.tx_reference_level_response.cell.gain = gain
