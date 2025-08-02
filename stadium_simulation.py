@@ -356,12 +356,14 @@ class StadiumSimulation:
         metric_ues: List[UE] = []
         if success:
             # Recalculate metrics for all UEs on previous cell since interference patterns have changed
-            for ue in old_cell.connected_ues:
+            # Create a copy of the set to avoid "Set changed size during iteration" error
+            for ue in list(old_cell.connected_ues):
                 ue.calculate_signal_metrics(self.radio_units)
                 metric_ues.append(ue)
 
             # Recalculate metrics for all UEs on target cell since interference patterns have changed
-            for ue in target_cell.connected_ues:
+            # Create a copy of the set to avoid "Set changed size during iteration" error
+            for ue in list(target_cell.connected_ues):
                 ue.calculate_signal_metrics(self.radio_units)
                 metric_ues.append(ue)
 
