@@ -22,6 +22,7 @@ from typing import List
 from time import sleep
 import csv
 import time
+import os
 
 import proto.signaling_pb2 as pb
 
@@ -32,10 +33,17 @@ class Ofh:
         self.__addr = addr
         self.__port = port
         self.__sim = sim
+        self.__connected = False
         
-        # Initialize CSV logging for power changes
-        self.__power_log_file = "cell_power_changes.csv"
+        # Initialize CSV logging for power changes in logs/ with timestamped filename
         self.__experiment_start_time = time.time()
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(self.__experiment_start_time))
+        logs_dir = "logs"
+        try:
+            os.makedirs(logs_dir, exist_ok=True)
+        except Exception as e:
+            print(f"Warning: Unable to ensure logs directory exists: {e}")
+        self.__power_log_file = os.path.join(logs_dir, f"cell_power_changes_{timestamp}.csv")
         self.__init_power_log_csv()
 
     def run(self) -> bool:
@@ -44,7 +52,7 @@ class Ofh:
             :raises RuntimeError: If it was unable to startup the OFH module.
         """
         self.__client = Client()
-        self.__client.connect(self.__addr, self.__port)
+        self.__connect_with_backoff()
 
         self.__ok2run = True
         self.__listener = Thread(None, self.receiver)
@@ -78,9 +86,33 @@ class Ofh:
         self.__client.disconnect()
         self.__listener.join()
 
+    def __connect_with_backoff(self):
+        """Try connecting with exponential backoff; block until connected or max wait."""
+        base_delay = 0.5
+        max_delay = 10.0
+        attempt = 0
+        while True:
+            try:
+                self.__client.connect(self.__addr, self.__port)
+                self.__connected = True
+                print(f"Connected to OFH server at {self.__addr}:{self.__port}")
+                return
+            except RuntimeError as e:
+                self.__connected = False
+                delay = min(max_delay, base_delay * (2 ** attempt))
+                # Add small jitter to avoid thundering herd
+                delay = delay * (1.0 + (0.1 * (attempt % 3)))
+                print(f"Connection failed: {e}. Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+                attempt += 1
+
     def __init_power_log_csv(self):
         """Initialize the CSV file for logging cell power changes"""
         try:
+            # Ensure directory exists for the log file
+            directory = os.path.dirname(self.__power_log_file)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
             with open(self.__power_log_file, 'w', newline='') as csvfile:
                 fieldnames = ['Time(h)', 'cell_pci', 'power_dbm']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -107,14 +139,39 @@ class Ofh:
             print(f"Warning: Unable to log power change to CSV: {e}")
 
     def send(self, message: pb.OfhMessage):
-        self.__client.send(message)
+        # Gate sends on connection status
+        try:
+            self.__client.send(message)
+        except Exception as e:
+            self.__connected = False
+            print(f"Send failed: {e}. Marking OFH as disconnected.")
 
     def receiver(self):
         print("Starting OFH receiver thread...")
 
         while self.__ok2run:
-            msg = self.__client.receive()
-            msg_type = msg.WhichOneof('type')
+            try:
+                msg = self.__client.receive()
+                # If parsing failed, receive() returns empty message; skip
+                msg_type = msg.WhichOneof('type')
+            except Exception as e:
+                # Socket error or invalid frame length
+                print(f"OFH receive error: {e}")
+                self.__connected = False
+                # Try to reconnect while still allowed to run
+                if not self.__ok2run:
+                    break
+                self.__connect_with_backoff()
+                # After reconnect, request a resync if needed (e.g., RU setup)
+                # Mark not ready and request setup again
+                self.__ready = False
+                try:
+                    self.send(self.create_ru_setup_request())
+                except Exception:
+                    pass
+                # Continue to next loop iteration
+                continue
+
             match msg_type:
                 case "registration_response":
                     if msg.registration_response.status == False:
@@ -155,6 +212,7 @@ class Ofh:
                     if msg.ru_setup_response.status == True:
                         print("RU has been setup on gNodeB")
                         self.__ready = True
+                        self.__connected = True
                     else:
                         print("Unable to fully setup RU on gNodeB. Reason: ", msg.ru_setup_response.error)
 
@@ -162,6 +220,7 @@ class Ofh:
                     if msg.ru_teardown_response.status == True:
                         self.__ready = False
                         print("RU Tear Down has completed on gNodeB")
+                        self.__connected = True
                     else:
                         print("Unable to fully Tear Down RU on gNodeB")
 

@@ -15,6 +15,8 @@
 # ==================================================================================
 
 import socket
+import time
+import json
 import proto.signaling_pb2 as pb
 from google.protobuf import message, text_format
 
@@ -23,11 +25,25 @@ class Client:
         This class abstracts the OFH TCP connection to E2Sim
     """
 
+    def __init__(self):
+        self.sock: socket.socket | None = None
+        # Telemetry counters
+        self.decode_failures: int = 0
+        self.partial_frames: int = 0
+        self.total_received_bytes: int = 0
+        self.last_bad_frame_info: dict | None = None
+
     def connect(self, addr: str, port: int):
         """Connects to a given server using a TCP socket
 
             :raises RuntimeError: If any error happens.
         """
+        # Close any previous socket before creating a new one
+        if getattr(self, 'sock', None):
+            try:
+                self.sock.close()
+            except Exception:
+                pass
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             self.sock.connect((addr, port))
@@ -65,32 +81,74 @@ class Client:
 
             :raises RuntimeError: If any error happens.
         """
-        chunks = []
-        bytes_rcvd = 0
-        msg_len = self.sock.recv(4)
-        msg_len = int.from_bytes(msg_len, byteorder='big')        # converting to host byte order
+        if self.sock is None:
+            raise RuntimeError("socket not connected")
 
-        while bytes_rcvd < msg_len:
-            chunk = self.sock.recv(msg_len - bytes_rcvd)
-            if chunk == b'':
-                raise RuntimeError("socket connection broken")
-            chunks.append(chunk)
-            bytes_rcvd += len(chunk)
+        # Helper to receive exactly n bytes or raise
+        def _recv_exact(n: int) -> bytes:
+            buf = bytearray()
+            while len(buf) < n:
+                chunk = self.sock.recv(n - len(buf))
+                if chunk == b'':
+                    # Partial frame marker
+                    self.partial_frames += 1
+                    raise RuntimeError("socket connection broken")
+                buf.extend(chunk)
+            return bytes(buf)
 
-        data = b''.join(chunks)
+        # Read 4-byte length header
+        header = _recv_exact(4)
+        msg_len = int.from_bytes(header, byteorder='big')  # network to host order
 
+        # Sanity-check message length (avoid pathological frames)
+        MAX_LEN = 10 * 1024 * 1024  # 10MB
+        if msg_len <= 0 or msg_len > MAX_LEN:
+            self.partial_frames += 1
+            raise RuntimeError(f"invalid message length: {msg_len}")
+
+        # Read message payload
+        data = _recv_exact(msg_len)
+        self.total_received_bytes += 4 + len(data)
+
+        # Attempt to parse protobuf
         msg = pb.OfhMessage()
         try:
             msg.ParseFromString(data)
         except message.DecodeError as e:
-            print(f"Error decoding protobuf message: {e}")
+            self.decode_failures += 1
+            # Capture a small hex preview for diagnostics
+            hex_head = data[:16].hex()
+            hex_tail = data[-16:].hex() if len(data) > 16 else ''
+            self.last_bad_frame_info = {
+                "ts": time.time(),
+                "msg_len": msg_len,
+                "data_len": len(data),
+                "hex_head": hex_head,
+                "hex_tail": hex_tail,
+                "error": str(e),
+            }
+            print(json.dumps({
+                "event": "protobuf_decode_error",
+                "ts": self.last_bad_frame_info["ts"],
+                "msg_len": msg_len,
+                "data_len": len(data),
+                "hex_head": hex_head,
+                "hex_tail": hex_tail,
+                "decode_failures": self.decode_failures
+            }))
+            # Return empty message to allow caller to continue
+            return pb.OfhMessage()
 
         return msg
 
     def disconnect(self):
         try:
-            self.sock.shutdown(socket.SHUT_WR)
-            self.sock.close()
+            if self.sock:
+                try:
+                    self.sock.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                self.sock.close()
         except OSError as e:
             print(e)
 
