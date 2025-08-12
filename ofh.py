@@ -44,6 +44,13 @@ class Ofh:
         except Exception as e:
             print(f"Warning: Unable to ensure logs directory exists: {e}")
         self.__power_log_file = os.path.join(logs_dir, f"cell_power_changes_{timestamp}.csv")
+        # Build header dynamically: Time + one column per PCI in sorted order
+        try:
+            self.__pci_order = sorted([ru.pci for ru in self.__sim.radio_units])
+        except Exception:
+            # Fallback: assume indices 0..N-1 if something goes wrong
+            self.__pci_order = list(range(len(self.__sim.radio_units)))
+        self.__fieldnames = ["Time(h)"] + [f"pci_{pci}" for pci in self.__pci_order]
         self.__init_power_log_csv()
 
     def run(self) -> bool:
@@ -114,27 +121,29 @@ class Ofh:
             if directory:
                 os.makedirs(directory, exist_ok=True)
             with open(self.__power_log_file, 'w', newline='') as csvfile:
-                fieldnames = ['Time(h)', 'cell_pci', 'power_dbm']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer = csv.DictWriter(csvfile, fieldnames=self.__fieldnames)
                 writer.writeheader()
         except Exception as e:
             print(f"Warning: Unable to initialize power log CSV: {e}")
 
-    def __log_power_change(self, pci: int, power_dbm: float):
-        """Log a power change event to CSV file"""
+    def __log_power_change(self):
+        """Log a snapshot row of all PCI power levels to the CSV file"""
         try:
             current_time = time.time()
             elapsed_time_seconds = current_time - self.__experiment_start_time
             elapsed_time_hours = elapsed_time_seconds / 3600.0  # Convert to hours
-            
+
+            # Build a map from PCI to current power
+            pci_to_power = {ru.pci: ru.tx_power for ru in self.__sim.radio_units}
+
+            # Construct the row using the predefined order
+            row = {"Time(h)": elapsed_time_hours}
+            for pci in self.__pci_order:
+                row[f"pci_{pci}"] = pci_to_power.get(pci, None)
+
             with open(self.__power_log_file, 'a', newline='') as csvfile:
-                fieldnames = ['Time(h)', 'cell_pci', 'power_dbm']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writerow({
-                    'Time(h)': elapsed_time_hours,
-                    'cell_pci': pci,
-                    'power_dbm': power_dbm
-                })
+                writer = csv.DictWriter(csvfile, fieldnames=self.__fieldnames)
+                writer.writerow(row)
         except Exception as e:
             print(f"Warning: Unable to log power change to CSV: {e}")
 
@@ -231,9 +240,9 @@ class Ofh:
                     print(f"Updating TX Reference Level for Cell pci={pci} to {gain} dBm")
                     status, ue_list = self.__sim.set_ru_power(pci, gain)
                     
-                    # Log the power change to CSV
+                    # Log a full snapshot row to CSV when any cell power changes
                     if status:
-                        self.__log_power_change(pci, gain)
+                        self.__log_power_change()
                     
                     response = pb.OfhMessage()
                     response.tx_reference_level_response.cell.pci = pci
