@@ -1,3 +1,6 @@
 .python-version
 __pycache__
 proto*
+logs/*
+cell_power_changes.csv
+*.pid

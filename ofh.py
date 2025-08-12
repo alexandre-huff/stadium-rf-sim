@@ -207,7 +207,9 @@ class Ofh:
             ue_metrics.primary_cell.metrics.rsrq = pri_metrics['rsrq']
             ue_metrics.primary_cell.metrics.sinr = pri_metrics['sinr']
 
-            for neigh_metrics in ue.get_neighbor_ru_metrics():
+            # Get only the best 8 neighbor cells (sorted by SINR in descending order)
+            best_neighbors = ue.get_neighbor_ru_metrics_by_sinr()[:8]
+            for neigh_metrics in best_neighbors:
                 cell_metrics = pb.CellMetrics()
                 cell_metrics.cell.pci = neigh_metrics['radio_unit'].pci
                 cell_metrics.metrics.rsrp = neigh_metrics['rsrp']
@@ -230,7 +232,9 @@ class Ofh:
             ue_metrics.primary_cell.metrics.rsrq = pri_metrics['rsrq']
             ue_metrics.primary_cell.metrics.sinr = pri_metrics['sinr']
 
-            for neigh_metrics in ue.get_neighbor_ru_metrics():
+            # Get only the best 4 neighbor cells (sorted by SINR in descending order)
+            best_neighbors = ue.get_neighbor_ru_metrics_by_sinr()[:4]
+            for neigh_metrics in best_neighbors:
                 cell_metrics = pb.CellMetrics()
                 cell_metrics.cell.pci = neigh_metrics['radio_unit'].pci
                 cell_metrics.metrics.rsrp = neigh_metrics['rsrp']

@@ -171,6 +171,24 @@ class UE:
         # Sort by RSRP
         return sorted(neighbor_metrics, key=lambda x: x['rsrp'], reverse=True)
 
+    def get_neighbor_ru_metrics_by_sinr(self) -> List[Dict[str, float]]:
+        """Get signal metrics for neighbor radio units sorted by SINR"""
+        if self.connected_ru is None:
+            return []
+
+        neighbor_metrics = []
+        for ru, rsrp in self.rsrp_measurements.items():
+            if ru != self.connected_ru:
+                neighbor_metrics.append({
+                    'radio_unit': ru,
+                    'rsrp': rsrp,
+                    'rsrq': self.rsrq_measurements[ru],
+                    'sinr': self.sinr_measurements[ru]
+                })
+
+        # Sort by SINR
+        return sorted(neighbor_metrics, key=lambda x: x['sinr'], reverse=True)
+
     def force_handoff(self, new_ru: RadioUnit) -> bool:
         """Force a handoff to a specific radio unit
 

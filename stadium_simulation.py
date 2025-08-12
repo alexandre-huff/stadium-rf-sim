@@ -61,16 +61,37 @@ class StadiumSimulation:
         self.shadow_std_nlos = 7.8   # Standard deviation for NLOS shadow fading
 
         # Initialize radio units with default power and incrementing channels
-        ru_positions = [
-            [-self.field_length/2 - 5, -self.field_width/4, self.bs_height],   # West side 1
-            [-self.field_length/2 - 5, self.field_width/4, self.bs_height],    # West side 2
-            [self.field_length/2 + 5, -self.field_width/4, self.bs_height],    # East side 1
-            [self.field_length/2 + 5, self.field_width/4, self.bs_height],     # East side 2
-            [-self.field_length/4, -self.field_width/2 - 5, self.bs_height],   # South side 1
-            [self.field_length/4, -self.field_width/2 - 5, self.bs_height],    # South side 2
-            [-self.field_length/4, self.field_width/2 + 5, self.bs_height],    # North side 1
-            [self.field_length/4, self.field_width/2 + 5, self.bs_height]      # North side 2
-        ]
+        # Generate 56 radio units distributed around the stadium perimeter
+        ru_positions = []
+        num_rus = 56
+        
+        # Calculate stadium perimeter positions
+        perimeter_distance = 2 * (self.field_length + self.field_width) + 8 * 5  # Add extra for corners
+        ru_spacing = perimeter_distance / num_rus
+        
+        # Generate positions around the perimeter
+        for i in range(num_rus):
+            angle = (2 * np.pi * i) / num_rus
+            
+            # Position RUs at varying distances around the stadium
+            if i % 4 == 0:  # Every 4th RU closer to field
+                distance_x = self.field_length/2 + 5
+                distance_y = self.field_width/2 + 5
+            elif i % 4 == 1:  # Slightly further
+                distance_x = self.field_length/2 + 8
+                distance_y = self.field_width/2 + 8
+            elif i % 4 == 2:  # Medium distance
+                distance_x = self.field_length/2 + 12
+                distance_y = self.field_width/2 + 12
+            else:  # Furthest from field
+                distance_x = self.field_length/2 + 15
+                distance_y = self.field_width/2 + 15
+            
+            x = distance_x * np.cos(angle)
+            y = distance_y * np.sin(angle)
+            z = self.bs_height
+            
+            ru_positions.append([x, y, z])
 
         self.radio_units: List[RadioUnit] = []
         for i, (x, y, z) in enumerate(ru_positions):
