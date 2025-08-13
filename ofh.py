@@ -190,13 +190,25 @@ class Ofh:
             print(f"Warning: Unable to log power change to CSV: {e}")
 
     def send(self, message: pb.OfhMessage):
-        # Gate sends on connection status
+        # Gate sends on connection status and ensure message has a type set
+        msg_type = message.WhichOneof('type')
+        if msg_type is None:
+            # Nothing to send; do not treat as a transport error and do not reconnect
+            print("Skip send: refusing to send zero-length OfhMessage (no type set)")
+            return
+
         try:
             self.__client.send(message)
         except Exception as e:
+            err = str(e)
+            # If the failure is due to empty message/zero-length frame, don't reconnect
+            if "zero-length frame" in err or "empty OfhMessage" in err:
+                print("Send failed: empty OfhMessage. Not reconnecting; fix the message and retry.")
+                return
+
+            # Otherwise this is a real I/O error; attempt to reconnect and retry once
             self.__connected = False
             print(f"Send failed: {e}. Attempting to reconnect and retry once...")
-            # Attempt reconnect with backoff, then retry once
             try:
                 self.__connect_with_backoff()
                 self.__client.send(message)

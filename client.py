@@ -164,11 +164,20 @@ class Client:
                     raise RuntimeError("socket connection broken")
                 self._recv_buf.extend(chunk)
 
-        # Helper: parse a 4-byte header strictly as big-endian 32-bit length
+        # Helper: parse a 4-byte header as either big-endian 32-bit or ASCII decimal length
         def _parse_len(header: bytes, max_len: int) -> int:
+            # Try big-endian binary length first
             be = int.from_bytes(header, 'big')
             if 0 < be <= max_len:
                 return be
+            # If header is ASCII digits (e.g., b"0100"), treat as decimal length
+            if all(48 <= b <= 57 for b in header):
+                try:
+                    dec = int(header.decode('ascii'))
+                    if 0 < dec <= max_len:
+                        return dec
+                except Exception:
+                    pass
             return -1
 
         MAX_LEN = 10 * 1024 * 1024  # 10MB
