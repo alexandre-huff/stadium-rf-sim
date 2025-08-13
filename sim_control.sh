@@ -7,6 +7,7 @@ set -euo pipefail
 
 PID_FILE="simulation.pid"
 LOG_DIR="logs"
+K8S_LOGS_PID="k8s-logs.pid"
 
 # Colors for output
 RED='\033[0;31m'
@@ -36,8 +37,9 @@ show_usage() {
     echo ""
     echo "Commands:"
     echo "  status   Show simulation status"
-    echo "  stop     Stop running simulation"
+    echo "  stop     Stop running simulation and Kubernetes pod logs"
     echo "  logs     Show recent logs (tail -f)"
+    echo "  k8s      Manage Kubernetes pod logs (status|start|stop)"
     echo "  clean    Clean up old logs and PID files"
     echo "  help     Show this help"
     echo ""
@@ -104,12 +106,12 @@ stop_simulation() {
                 return 0
             fi
         else
-            print_warning "PID file exists but process not running"
+            print_warning "PID file exists but process not running (stale PID). Cleaning up."
             rm -f "$PID_FILE"
-            return 1
+            return 0
         fi
     else
-        print_status "No simulation running"
+        print_status "No simulation running (no PID file)"
         return 0
     fi
 }
@@ -150,7 +152,76 @@ clean_logs() {
         fi
     fi
     
+    # Clean stale k8s logs PID
+    if [[ -f "$K8S_LOGS_PID" ]]; then
+        local alive=false
+        while IFS='|' read -r pid _; do
+            if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+                alive=true; break
+            fi
+        done < "$K8S_LOGS_PID"
+        if [[ "$alive" == false ]]; then
+            print_status "Removing stale $K8S_LOGS_PID"
+            rm -f "$K8S_LOGS_PID"
+        fi
+    fi
+
     print_status "Cleanup completed"
+}
+
+k8s_logs_stop() {
+    # Stop Kubernetes pod logs tailers if any
+    if [[ -x ./k8s_logs.sh ]]; then
+        print_status "Stopping Kubernetes pod logs"
+        ./k8s_logs.sh stop || true
+        return 0
+    fi
+    if [[ -f "$K8S_LOGS_PID" ]]; then
+        print_status "Stopping Kubernetes pod logs (legacy PID file)"
+        while IFS= read -r line; do
+            [[ -z "${line:-}" ]] && continue
+            local pid
+            if [[ "$line" == *"|"* ]]; then
+                pid="${line%%|*}"
+            else
+                pid="$line"
+            fi
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+                sleep 1
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done < "$K8S_LOGS_PID"
+        rm -f "$K8S_LOGS_PID"
+        return 0
+    fi
+    print_status "No Kubernetes pod log tailers to stop"
+    return 0
+}
+
+k8s_logs_cmd() {
+    local sub=${1:-status}
+    shift || true
+    if [[ ! -x ./k8s_logs.sh ]]; then
+        print_error "k8s_logs.sh not found or not executable"
+        return 1
+    fi
+    case "$sub" in
+        status)
+            ./k8s_logs.sh status
+            ;;
+        start)
+            ./k8s_logs.sh start "$@"
+            ;;
+        stop)
+            ./k8s_logs.sh stop
+            ;;
+        *)
+            print_error "Unknown k8s subcommand: $sub"
+            echo "Usage: $0 k8s [status|start|stop] [ns:prefix ...]"
+            return 1
+            ;;
+    esac
 }
 
 # Main execution
@@ -163,10 +234,15 @@ case $COMMAND in
         ;;
     stop)
         print_header "Stopping Simulation"
-        stop_simulation
+    stop_simulation || true
+    k8s_logs_stop || true
         ;;
     logs|log)
         show_logs
+        ;;
+    k8s)
+        shift || true
+        k8s_logs_cmd "$@"
         ;;
     clean)
         print_header "Cleaning Up"

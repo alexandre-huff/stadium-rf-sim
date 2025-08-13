@@ -13,6 +13,7 @@ LOG_FILE="simulation_${TIMESTAMP}.log"
 PID_FILE="simulation.pid"
 PYTHON_ENV="stadium-rf-sim"
 E2SIM_POD_NAME="e2sim"
+K8S_LOGS=true
 
 # Colors for output
 RED='\033[0;31m'
@@ -103,6 +104,8 @@ show_usage() {
     echo "  -f, --foreground Run in foreground"
     echo "  -l, --log-dir    Log directory (default: logs)"
     echo "  -p, --pod-name   E2SIM pod name (default: $E2SIM_POD_NAME)"
+    echo "      --k8s-logs   Enable Kubernetes pod logs capture (default)"
+    echo "      --no-k8s-logs Disable Kubernetes pod logs capture"
     echo "  -h, --help       Show this help"
     echo ""
     echo "Examples:"
@@ -137,6 +140,33 @@ setup_logging() {
     
     # Keep only last 10 log files
     find "$LOG_DIR" -name "simulation_*.log" -type f | sort -r | tail -n +11 | xargs rm -f 2>/dev/null || true
+}
+
+# Kubernetes logs helpers
+start_k8s_logs() {
+    if [[ "$K8S_LOGS" != "true" ]]; then
+        return 0
+    fi
+    if ! command -v kubectl &> /dev/null; then
+        print_warning "kubectl not found; skipping k8s logs"
+        return 0
+    fi
+    if [[ -x ./k8s_logs.sh ]]; then
+        print_status "Starting Kubernetes pod log capture"
+        ./k8s_logs.sh start || print_warning "Failed to start k8s logs"
+    else
+        print_warning "k8s_logs.sh not found or not executable; skipping k8s logs"
+    fi
+}
+
+stop_k8s_logs() {
+    if [[ "$K8S_LOGS" != "true" ]]; then
+        return 0
+    fi
+    if [[ -x ./k8s_logs.sh ]]; then
+        print_status "Stopping Kubernetes pod log capture"
+        ./k8s_logs.sh stop || true
+    fi
 }
 
 # Function to activate conda environment
@@ -178,6 +208,7 @@ run_background() {
     sleep 2
     if kill -0 $pid 2>/dev/null; then
         print_status "Simulation started successfully with PID: $pid"
+    start_k8s_logs
         print_status ""
         print_status "Monitoring commands:"
         print_status "  Watch logs: tail -f $LOG_FILE"
@@ -198,9 +229,12 @@ run_foreground() {
     print_status "Log file: $LOG_FILE"
     print_status "Press Ctrl+C to stop"
     print_status ""
-    
+    start_k8s_logs
     # Use tee to both display and log
     python main.py "$DEST_ADDR" 2>&1 | tee "$LOG_FILE"
+    local exit_code=${PIPESTATUS[0]}
+    stop_k8s_logs
+    return $exit_code
 }
 
 # Parse command line arguments
@@ -226,6 +260,14 @@ while [[ $# -gt 0 ]]; do
         -p|--pod-name)
             E2SIM_POD_NAME="$2"
             shift 2
+            ;;
+        --k8s-logs)
+            K8S_LOGS=true
+            shift
+            ;;
+        --no-k8s-logs)
+            K8S_LOGS=false
+            shift
             ;;
         -*)
             print_error "Unknown option: $1"
