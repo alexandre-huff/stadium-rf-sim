@@ -34,6 +34,8 @@ class Ofh:
         self.__port = port
         self.__sim = sim
         self.__connected = False
+        self.__hb_thread = None  # type: ignore[var-annotated]
+        self.__hb_running = False
         
         # Initialize CSV logging for power changes in logs/ with timestamped filename
         self.__experiment_start_time = time.time()
@@ -65,6 +67,9 @@ class Ofh:
         self.__listener = Thread(None, self.receiver)
         self.__listener.start()
 
+        # Start heartbeat sender thread
+        self.__start_heartbeat()
+
         self.__ready = False
         message = self.create_ru_setup_request()
         self.send(message)
@@ -90,6 +95,7 @@ class Ofh:
             print("Unable to tear down RU on gNodeB. Exitting anyway...")
 
         self.__ok2run = False
+        self.__stop_heartbeat()
         self.__client.disconnect()
         self.__listener.join()
 
@@ -112,6 +118,42 @@ class Ofh:
                 print(f"Connection failed: {e}. Retrying in {delay:.1f}s...")
                 time.sleep(delay)
                 attempt += 1
+
+    def __start_heartbeat(self):
+        if self.__hb_thread and self.__hb_thread.is_alive():
+            return
+        self.__hb_running = True
+        self.__hb_thread = Thread(target=self.__heartbeat_loop, daemon=True)
+        self.__hb_thread.start()
+
+    def __stop_heartbeat(self):
+        self.__hb_running = False
+        t = self.__hb_thread
+        if t and t.is_alive():
+            t.join(timeout=2.0)
+
+    def __heartbeat_loop(self):
+        import random
+        base_interval = 10.0  # seconds
+        jitter_pct = 0.15
+        while self.__hb_running and getattr(self, "__ok2run", False):
+            # Skip heartbeat if not connected
+            if not self.__connected:
+                time.sleep(1.0)
+                continue
+            # Construct and send heartbeat; do not await any response
+            hb = pb.OfhMessage()
+            ts_ms = int(time.time() * 1000)
+            hb.heartbeat.ts_ms = ts_ms
+            try:
+                self.__client.send(hb)
+            except Exception as e:
+                # Mark disconnected; receiver will try to reconnect
+                print(f"Heartbeat send failed: {e}")
+                self.__connected = False
+            # Sleep with jitter to avoid synchronization bursts
+            jitter = 1.0 + random.uniform(-jitter_pct, jitter_pct)
+            time.sleep(max(1.0, base_interval * jitter))
 
     def __init_power_log_csv(self):
         """Initialize the CSV file for logging cell power changes"""
@@ -153,7 +195,16 @@ class Ofh:
             self.__client.send(message)
         except Exception as e:
             self.__connected = False
-            print(f"Send failed: {e}. Marking OFH as disconnected.")
+            print(f"Send failed: {e}. Attempting to reconnect and retry once...")
+            # Attempt reconnect with backoff, then retry once
+            try:
+                self.__connect_with_backoff()
+                self.__client.send(message)
+                self.__connected = True
+                print("Retry send succeeded after reconnect.")
+            except Exception as e2:
+                self.__connected = False
+                print(f"Retry send failed: {e2}. Marking OFH as disconnected.")
 
     def receiver(self):
         print("Starting OFH receiver thread...")

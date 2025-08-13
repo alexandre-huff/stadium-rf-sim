@@ -15,10 +15,36 @@
 # ==================================================================================
 
 import socket
+import signal
 import time
 import json
 import proto.signaling_pb2 as pb
+from threading import Lock
 from google.protobuf import message, text_format
+
+# Helper placed before class to avoid forward reference issues
+def _safe_int_from_header(header: bytes) -> int:
+    """Best-effort integer representation of a 4-byte header for error messages.
+    Tries BE, LE, and ASCII decimal; returns -1 on failure.
+    """
+    try:
+        be = int.from_bytes(header, 'big')
+        if be >= 0:
+            return be
+    except Exception:
+        pass
+    try:
+        le = int.from_bytes(header, 'little')
+        if le >= 0:
+            return le
+    except Exception:
+        pass
+    try:
+        if all(48 <= b <= 57 for b in header):
+            return int(header.decode('ascii'))
+    except Exception:
+        pass
+    return -1
 
 class Client:
     """
@@ -26,12 +52,25 @@ class Client:
     """
 
     def __init__(self):
-        self.sock: socket.socket | None = None
+        self.sock = None  # type: socket.socket | None
+        self._addr = None  # type: str | None
+        self._port = None  # type: int | None
+        self._send_lock = Lock()
         # Telemetry counters
-        self.decode_failures: int = 0
-        self.partial_frames: int = 0
-        self.total_received_bytes: int = 0
-        self.last_bad_frame_info: dict | None = None
+        self.decode_failures = 0
+        self.partial_frames = 0
+        self.total_received_bytes = 0
+        self.last_bad_frame_info = None  # type: dict | None
+        # Persistent receive buffer to handle TCP segmentation/coalescing
+        self._recv_buf = bytearray()
+
+        # Suppress SIGPIPE globally on POSIX so failed sends raise exceptions instead of killing the proc
+        if hasattr(signal, "SIGPIPE"):
+            try:
+                signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+            except Exception:
+                # Best-effort; ignore if not permitted in current context
+                pass
 
     def connect(self, addr: str, port: int):
         """Connects to a given server using a TCP socket
@@ -45,36 +84,68 @@ class Client:
             except Exception:
                 pass
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Enable TCP keepalive with sensible defaults (Linux)
         try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Tune keepalive parameters if available (Linux specific)
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except Exception:
+            # Non-fatal; proceed without keepalive tuning if not supported
+            pass
+        try:
+            self._addr, self._port = addr, port
             self.sock.connect((addr, port))
         except Exception as e:
             raise RuntimeError(f"Unable to open connection on {addr}:{port}. Cause: {e}")
 
-    def send(self, message: pb.OfhMessage):
+    def send(self, ofh_msg: pb.OfhMessage):
         """Send a message to the server
 
             :raises RuntimeError: If any error happens.
         """
-        data = message.SerializeToString()
-        size = message.ByteSize()
+        if self.sock is None:
+            raise RuntimeError("socket not connected")
 
-        data_len = size.to_bytes(4, byteorder='big')    # converting to network byte order
-        try:
-            sent = self.sock.send(data_len)
-            if sent == 0:
-                raise RuntimeError("socket connection broken")
-        except BrokenPipeError as e:
-            raise RuntimeError(f"{e}. socket connection broken")
+        data = ofh_msg.SerializeToString()
+        size = len(data)
 
-        total_sent = 0
-        while total_sent < size:
-            try:
-                sent = self.sock.send(data[total_sent:])
-                if sent == 0:
-                    raise RuntimeError("socket connection broken")
-                total_sent += sent
-            except BrokenPipeError as e:
-                raise RuntimeError(f"{e}. socket connection broken")
+        # Do not send zero-length frames; caller should avoid sending empty messages
+        if size == 0:
+            raise RuntimeError("refusing to send zero-length frame (empty OfhMessage)")
+
+        header = size.to_bytes(4, byteorder='big')  # 4-byte big-endian length prefix
+
+        # Prefer to suppress SIGPIPE per-send if available
+        send_flags = getattr(socket, 'MSG_NOSIGNAL', 0)
+
+        # Serialize multi-part frame writes to prevent interleaving across threads
+        with self._send_lock:
+            # Send header fully
+            total_sent = 0
+            while total_sent < 4:
+                try:
+                    sent = self.sock.send(header[total_sent:], send_flags)
+                    if sent == 0:
+                        raise RuntimeError("socket connection broken")
+                    total_sent += sent
+                except (BrokenPipeError, OSError) as e:
+                    raise RuntimeError(f"{e}. socket connection broken")
+
+            # Send payload fully
+            total_sent = 0
+            while total_sent < size:
+                try:
+                    sent = self.sock.send(data[total_sent:], send_flags)
+                    if sent == 0:
+                        raise RuntimeError("socket connection broken")
+                    total_sent += sent
+                except (BrokenPipeError, OSError) as e:
+                    raise RuntimeError(f"{e}. socket connection broken")
 
     def receive(self) -> pb.OfhMessage:
         """Receive a message from the server
@@ -84,30 +155,39 @@ class Client:
         if self.sock is None:
             raise RuntimeError("socket not connected")
 
-        # Helper to receive exactly n bytes or raise
-        def _recv_exact(n: int) -> bytes:
-            buf = bytearray()
-            while len(buf) < n:
-                chunk = self.sock.recv(n - len(buf))
+        # Helper: ensure at least n bytes in buffer
+        def _fill_buf(n: int):
+            while len(self._recv_buf) < n:
+                chunk = self.sock.recv(max(1, n - len(self._recv_buf)))
                 if chunk == b'':
-                    # Partial frame marker
                     self.partial_frames += 1
                     raise RuntimeError("socket connection broken")
-                buf.extend(chunk)
-            return bytes(buf)
+                self._recv_buf.extend(chunk)
 
-        # Read 4-byte length header
-        header = _recv_exact(4)
-        msg_len = int.from_bytes(header, byteorder='big')  # network to host order
+        # Helper: parse a 4-byte header strictly as big-endian 32-bit length
+        def _parse_len(header: bytes, max_len: int) -> int:
+            be = int.from_bytes(header, 'big')
+            if 0 < be <= max_len:
+                return be
+            return -1
 
-        # Sanity-check message length (avoid pathological frames)
         MAX_LEN = 10 * 1024 * 1024  # 10MB
-        if msg_len <= 0 or msg_len > MAX_LEN:
-            self.partial_frames += 1
-            raise RuntimeError(f"invalid message length: {msg_len}")
 
-        # Read message payload
-        data = _recv_exact(msg_len)
+        # Ensure we have at least the 4-byte length header
+        _fill_buf(4)
+        header = bytes(self._recv_buf[:4])
+        msg_len = _parse_len(header, MAX_LEN)
+        if msg_len <= 0:
+            self.partial_frames += 1
+            # Log header bytes for diagnostics
+            hdr_hex = header.hex()
+            raise RuntimeError(f"invalid message length: {_safe_int_from_header(header)} (hdr=0x{hdr_hex})")
+
+        # Ensure we have the whole frame: header + payload
+        _fill_buf(4 + msg_len)
+        # Slice out the payload and advance buffer
+        data = bytes(self._recv_buf[4:4 + msg_len])
+        del self._recv_buf[:4 + msg_len]
         self.total_received_bytes += 4 + len(data)
 
         # Attempt to parse protobuf
@@ -115,6 +195,39 @@ class Client:
         try:
             msg.ParseFromString(data)
         except message.DecodeError as e:
+            # Fallback: some servers prepend an additional 4-byte length inside the payload.
+            # Try to peel it off and parse again.
+            def _try_inner_parse(payload: bytes) -> pb.OfhMessage | None:
+                if len(payload) < 8:
+                    return None
+                inner_hdr = payload[:4]
+                # Try BE, LE, ASCII
+                candidates: list[int] = []
+                candidates.append(int.from_bytes(inner_hdr, 'big'))
+                candidates.append(int.from_bytes(inner_hdr, 'little'))
+                if all(48 <= b <= 57 for b in inner_hdr):
+                    try:
+                        candidates.append(int(inner_hdr.decode('ascii')))
+                    except Exception:
+                        pass
+                for ilen in candidates:
+                    if 0 < ilen <= len(payload) - 4:
+                        inner = payload[4:4 + ilen]
+                        tmp = pb.OfhMessage()
+                        try:
+                            tmp.ParseFromString(inner)
+                            # On success, adjust counters and return
+                            return tmp
+                        except Exception:
+                            continue
+                return None
+
+            inner_msg = _try_inner_parse(data)
+            if inner_msg is not None:
+                # Count as partial frame fix-up
+                self.partial_frames += 1
+                return inner_msg
+
             self.decode_failures += 1
             # Capture a small hex preview for diagnostics
             hex_head = data[:16].hex()
@@ -145,17 +258,22 @@ class Client:
         try:
             if self.sock:
                 try:
-                    self.sock.shutdown(socket.SHUT_WR)
+                    # Attempt full-duplex shutdown before close
+                    self.sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
+                    # Socket may already be closed or half-closed
                     pass
-                self.sock.close()
+                try:
+                    self.sock.close()
+                finally:
+                    self.sock = None
         except OSError as e:
             print(e)
 
 
 if __name__ == "__main__":
     ue_metrics = pb.UeMetrics()
-    ue_metrics.ue.ue_id = "1"
+    ue_metrics.ue.imsi = "1"
     ue_metrics.primary_cell.cell.pci = 1
     ue_metrics.primary_cell.metrics.rsrp = -50
     ue_metrics.primary_cell.metrics.rsrq = -5
