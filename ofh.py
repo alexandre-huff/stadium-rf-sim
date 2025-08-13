@@ -276,7 +276,8 @@ class Ofh:
                     self.send(response)
 
                     # Send updated metrics after handover from all UEs on old cell and target cell
-                    if status == True:
+                    # Only send if there is at least one UE to report to avoid empty OfhMessage
+                    if status == True and ues:
                         message = self.create_metrics_request(ues)
                         self.send(message)
 
@@ -317,7 +318,8 @@ class Ofh:
                     self.send(response)
 
                      # Send updated metrics after updating TX Reference Level from all UEs on that cell
-                    if status == True:
+                    # Only send if there is at least one UE to report to avoid empty OfhMessage
+                    if status == True and ue_list:
                         message = self.create_metrics_request(ue_list)
                         self.send(message)
 

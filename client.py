@@ -155,113 +155,71 @@ class Client:
         if self.sock is None:
             raise RuntimeError("socket not connected")
 
-        # Helper: ensure at least n bytes in buffer
+        # Helper: ensure at least n bytes in buffer, otherwise read more.
         def _fill_buf(n: int):
             while len(self._recv_buf) < n:
-                chunk = self.sock.recv(max(1, n - len(self._recv_buf)))
+                try:
+                    chunk = self.sock.recv(max(1, n - len(self._recv_buf)))
+                except OSError as e:
+                    raise RuntimeError(f"socket recv error: {e}")
                 if chunk == b'':
+                    # Peer closed connection -> let caller handle reconnect
                     self.partial_frames += 1
                     raise RuntimeError("socket connection broken")
                 self._recv_buf.extend(chunk)
 
-        # Helper: parse a 4-byte header as either big-endian 32-bit or ASCII decimal length
-        def _parse_len(header: bytes, max_len: int) -> int:
-            # Try big-endian binary length first
-            be = int.from_bytes(header, 'big')
-            if 0 < be <= max_len:
-                return be
-            # If header is ASCII digits (e.g., b"0100"), treat as decimal length
-            if all(48 <= b <= 57 for b in header):
-                try:
-                    dec = int(header.decode('ascii'))
-                    if 0 < dec <= max_len:
-                        return dec
-                except Exception:
-                    pass
-            return -1
-
         MAX_LEN = 10 * 1024 * 1024  # 10MB
 
-        # Ensure we have at least the 4-byte length header
-        _fill_buf(4)
-        header = bytes(self._recv_buf[:4])
-        msg_len = _parse_len(header, MAX_LEN)
-        if msg_len <= 0:
-            self.partial_frames += 1
-            # Log header bytes for diagnostics
-            hdr_hex = header.hex()
-            raise RuntimeError(f"invalid message length: {_safe_int_from_header(header)} (hdr=0x{hdr_hex})")
+        # Strict 4-byte big-endian length-prefixed framing with resync on bad header
+        while True:
+            # Ensure we have a header
+            _fill_buf(4)
+            header = bytes(self._recv_buf[:4])
+            msg_len = int.from_bytes(header, 'big')
 
-        # Ensure we have the whole frame: header + payload
-        _fill_buf(4 + msg_len)
-        # Slice out the payload and advance buffer
-        data = bytes(self._recv_buf[4:4 + msg_len])
-        del self._recv_buf[:4 + msg_len]
-        self.total_received_bytes += 4 + len(data)
-
-        # Attempt to parse protobuf
-        msg = pb.OfhMessage()
-        try:
-            msg.ParseFromString(data)
-        except message.DecodeError as e:
-            # Fallback: some servers prepend an additional 4-byte length inside the payload.
-            # Try to peel it off and parse again.
-            def _try_inner_parse(payload: bytes) -> pb.OfhMessage | None:
-                if len(payload) < 8:
-                    return None
-                inner_hdr = payload[:4]
-                # Try BE, LE, ASCII
-                candidates: list[int] = []
-                candidates.append(int.from_bytes(inner_hdr, 'big'))
-                candidates.append(int.from_bytes(inner_hdr, 'little'))
-                if all(48 <= b <= 57 for b in inner_hdr):
-                    try:
-                        candidates.append(int(inner_hdr.decode('ascii')))
-                    except Exception:
-                        pass
-                for ilen in candidates:
-                    if 0 < ilen <= len(payload) - 4:
-                        inner = payload[4:4 + ilen]
-                        tmp = pb.OfhMessage()
-                        try:
-                            tmp.ParseFromString(inner)
-                            # On success, adjust counters and return
-                            return tmp
-                        except Exception:
-                            continue
-                return None
-
-            inner_msg = _try_inner_parse(data)
-            if inner_msg is not None:
-                # Count as partial frame fix-up
+            if not (1 <= msg_len <= MAX_LEN):
+                # Bad header: do not tear down; drop one byte and try to resync
+                # Optionally record minimal diagnostics for observability
                 self.partial_frames += 1
-                return inner_msg
+                # Drop just the first byte and keep scanning
+                del self._recv_buf[:1]
+                continue
 
-            self.decode_failures += 1
-            # Capture a small hex preview for diagnostics
-            hex_head = data[:16].hex()
-            hex_tail = data[-16:].hex() if len(data) > 16 else ''
-            self.last_bad_frame_info = {
-                "ts": time.time(),
-                "msg_len": msg_len,
-                "data_len": len(data),
-                "hex_head": hex_head,
-                "hex_tail": hex_tail,
-                "error": str(e),
-            }
-            print(json.dumps({
-                "event": "protobuf_decode_error",
-                "ts": self.last_bad_frame_info["ts"],
-                "msg_len": msg_len,
-                "data_len": len(data),
-                "hex_head": hex_head,
-                "hex_tail": hex_tail,
-                "decode_failures": self.decode_failures
-            }))
-            # Return empty message to allow caller to continue
-            return pb.OfhMessage()
+            # We have a plausible frame; ensure entire payload is available
+            _fill_buf(4 + msg_len)
+            data = bytes(self._recv_buf[4:4 + msg_len])
+            del self._recv_buf[:4 + msg_len]
+            self.total_received_bytes += 4 + len(data)
 
-        return msg
+            # Try to decode protobuf payload
+            msg = pb.OfhMessage()
+            try:
+                msg.ParseFromString(data)
+                return msg
+            except message.DecodeError as e:
+                # Log first 16 bytes and continue without tearing down
+                self.decode_failures += 1
+                hex_head = data[:16].hex()
+                ts = time.time()
+                self.last_bad_frame_info = {
+                    "ts": ts,
+                    "msg_len": msg_len,
+                    "data_len": len(data),
+                    "hex_head": hex_head,
+                    "error": str(e),
+                    "hdr_hex": header.hex(),
+                }
+                print(json.dumps({
+                    "event": "protobuf_decode_error",
+                    "ts": ts,
+                    "msg_len": msg_len,
+                    "data_len": len(data),
+                    "hex_head": hex_head,
+                    "decode_failures": self.decode_failures,
+                    "hdr_hex": header.hex(),
+                }))
+                # Return empty message to allow caller to continue; connection stays up
+                return pb.OfhMessage()
 
     def disconnect(self):
         try:
