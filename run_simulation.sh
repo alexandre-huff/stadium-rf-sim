@@ -201,7 +201,7 @@ run_background() {
     
     # Start simulation with nohup
     # Prefix each log line with datetime while preserving line buffering
-    local cmd="stdbuf -oL -eL python main.py \"$DEST_ADDR\" 2>&1 | while IFS= read -r line; do printf '%s %s\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" \"$line\"; done >> \"$LOG_FILE\""
+    local cmd="stdbuf -oL -eL python main.py \"$DEST_ADDR\" 2>&1 | while IFS= read -r line; do printf '%s %s\n' \"\$(date '+%Y-%m-%d %H:%M:%S')\" \"\$line\"; done >> \"$LOG_FILE\""
     nohup bash -c "$cmd" >/dev/null 2>&1 &
     local pid=$!
     echo $pid > "$PID_FILE"
