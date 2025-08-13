@@ -200,7 +200,9 @@ run_background() {
     print_status "PID file: $PID_FILE"
     
     # Start simulation with nohup
-    nohup python main.py "$DEST_ADDR" > "$LOG_FILE" 2>&1 &
+    # Prefix each log line with datetime while preserving line buffering
+    local cmd="stdbuf -oL -eL python main.py \"$DEST_ADDR\" 2>&1 | while IFS= read -r line; do printf '%s %s\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" \"$line\"; done >> \"$LOG_FILE\""
+    nohup bash -c "$cmd" >/dev/null 2>&1 &
     local pid=$!
     echo $pid > "$PID_FILE"
     
@@ -231,7 +233,9 @@ run_foreground() {
     print_status ""
     start_k8s_logs
     # Use tee to both display and log
-    python main.py "$DEST_ADDR" 2>&1 | tee "$LOG_FILE"
+    stdbuf -oL -eL python main.py "$DEST_ADDR" 2>&1 \
+        | while IFS= read -r line; do printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$line"; done \
+        | tee "$LOG_FILE"
     local exit_code=${PIPESTATUS[0]}
     stop_k8s_logs
     return $exit_code
