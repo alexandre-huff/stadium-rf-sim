@@ -36,7 +36,13 @@ class Ofh:
         self.__connected = False
         self.__hb_thread = None  # type: ignore[var-annotated]
         self.__hb_running = False
-        
+
+        # Cache of last-sent primary-cell metrics per UE to avoid redundant sends
+        # imsi -> { 'pci': int, 'rsrp': float, 'rsrq': float, 'sinr': float }
+        self.__last_ue_metrics = {}
+        # Threshold in dB to consider a signal-level change (avoid float noise)
+        self.__metric_change_epsilon = 0.1
+
         # Initialize CSV logging for power changes in logs/ with timestamped filename
         self.__experiment_start_time = time.time()
         timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(self.__experiment_start_time))
@@ -54,6 +60,41 @@ class Ofh:
             self.__pci_order = list(range(len(self.__sim.radio_units)))
         self.__fieldnames = ["Time(h)"] + [f"pci_{pci}" for pci in self.__pci_order]
         self.__init_power_log_csv()
+
+    def __extract_primary_metrics(self, ue: UE) -> tuple[int, float, float, float] | None:
+        """Return (pci, rsrp, rsrq, sinr) for UE's primary (connected) cell.
+        Returns None if UE not attached yet.
+        """
+        if ue.connected_ru is None:
+            return None
+        m = ue.get_connected_ru_metrics()
+        # m keys: rsrp, rsrq, sinr
+        return (ue.connected_ru.pci, float(m['rsrp']), float(m['rsrq']), float(m['sinr']))
+
+    def __has_signal_change(self, imsi: str, cur: tuple[int, float, float, float]) -> bool:
+        """Decide if the current primary metrics changed vs last sent."""
+        last = self.__last_ue_metrics.get(imsi)
+        if last is None:
+            # No baseline -> treat as changed so we send once
+            return True
+        last_pci = int(last['pci'])
+        if cur[0] != last_pci:
+            return True
+        # Compare any metric change above epsilon
+        eps = self.__metric_change_epsilon
+        return (
+            abs(cur[1] - float(last['rsrp'])) > eps or
+            abs(cur[2] - float(last['rsrq'])) > eps or
+            abs(cur[3] - float(last['sinr'])) > eps
+        )
+
+    def __update_last_metrics(self, imsi: str, cur: tuple[int, float, float, float]) -> None:
+        self.__last_ue_metrics[imsi] = {
+            'pci': int(cur[0]),
+            'rsrp': float(cur[1]),
+            'rsrq': float(cur[2]),
+            'sinr': float(cur[3]),
+        }
 
     def run(self) -> bool:
         """Starts up the OFH client to interact with E2Sim
@@ -351,19 +392,30 @@ class Ofh:
                 ue_metrics.neighbor_cells.append(cell_metrics)
 
             message.registration_request.ue_metrics.append(ue_metrics)
+            # Establish baseline so later metrics are sent only on change
+            self.__update_last_metrics(
+                ue.imsi,
+                (ue.connected_ru.pci, float(pri_metrics['rsrp']), float(pri_metrics['rsrq']), float(pri_metrics['sinr']))
+            )
 
         return message
 
     def create_metrics_request(self, ues: List[UE]) -> pb.OfhMessage:
+        # Build metrics only for UEs whose primary signal-level changed
         message = pb.OfhMessage()
         for ue in ues:
-            pri_metrics = ue.get_connected_ru_metrics()
+            cur = self.__extract_primary_metrics(ue)
+            if cur is None:
+                continue
+            if not self.__has_signal_change(ue.imsi, cur):
+                continue
+
             ue_metrics = pb.UeMetrics()
             ue_metrics.ue.imsi = ue.imsi
-            ue_metrics.primary_cell.cell.pci = ue.connected_ru.pci
-            ue_metrics.primary_cell.metrics.rsrp = pri_metrics['rsrp']
-            ue_metrics.primary_cell.metrics.rsrq = pri_metrics['rsrq']
-            ue_metrics.primary_cell.metrics.sinr = pri_metrics['sinr']
+            ue_metrics.primary_cell.cell.pci = cur[0]
+            ue_metrics.primary_cell.metrics.rsrp = cur[1]
+            ue_metrics.primary_cell.metrics.rsrq = cur[2]
+            ue_metrics.primary_cell.metrics.sinr = cur[3]
 
             # Get only the best 4 neighbor cells (sorted by SINR in descending order)
             best_neighbors = ue.get_neighbor_ru_metrics_by_sinr()[:4]
@@ -376,6 +428,8 @@ class Ofh:
                 ue_metrics.neighbor_cells.append(cell_metrics)
 
             message.metrics_request.ue_metrics.append(ue_metrics)
+            # Update cache only when we're actually sending this UE
+            self.__update_last_metrics(ue.imsi, cur)
 
         return message
 
@@ -386,6 +440,9 @@ class Ofh:
             ue_deregistration.ue.imsi = ue.imsi
             ue_deregistration.cell.pci = ue.connected_ru.pci
             message.deregistration_request.ues.append(ue_deregistration)
+            # Remove baseline cache for this UE
+            if ue.imsi in self.__last_ue_metrics:
+                self.__last_ue_metrics.pop(ue.imsi, None)
 
         return message
 

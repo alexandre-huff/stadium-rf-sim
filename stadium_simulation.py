@@ -237,7 +237,8 @@ class StadiumSimulation:
         # Recalculate signal metrics for all UEs connected on this RU and only
         # compute for this RU since signal power of the other RUs did not change.
         metric_ues: List[UE] = []
-        for ue in self.radio_units[ru_idx].connected_ues:
+        # Create a copy of the set to avoid "Set changed size during iteration" error
+        for ue in list(self.radio_units[ru_idx].connected_ues):
             ue.calculate_signal_metrics(self.radio_units)
             metric_ues.append(ue)
 

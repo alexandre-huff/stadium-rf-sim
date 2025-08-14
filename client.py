@@ -188,6 +188,7 @@ class Client:
             # We have a plausible frame; ensure entire payload is available
             _fill_buf(4 + msg_len)
             data = bytes(self._recv_buf[4:4 + msg_len])
+            # Only delete from buffer once we've successfully parsed or decided how to resync
             del self._recv_buf[:4 + msg_len]
             self.total_received_bytes += 4 + len(data)
 
@@ -197,7 +198,34 @@ class Client:
                 msg.ParseFromString(data)
                 return msg
             except message.DecodeError as e:
-                # Log first 16 bytes and continue without tearing down
+                # Fallback 1: If payload itself starts with another plausible 4-byte length,
+                # treat it as an extra nested length prefix injected by peer.
+                if len(data) >= 4:
+                    inner_len = int.from_bytes(data[:4], 'big')
+                    if 1 <= inner_len <= MAX_LEN:
+                        # Case A: we already have a full inner frame inside this payload
+                        if inner_len <= len(data) - 4:
+                            inner_payload = data[4:4 + inner_len]
+                            tail = data[4 + inner_len:]
+                            try:
+                                msg2 = pb.OfhMessage()
+                                msg2.ParseFromString(inner_payload)
+                                # Prepend any tail bytes back to the recv buffer for next iteration
+                                if tail:
+                                    self._recv_buf[:0] = tail
+                                return msg2
+                            except message.DecodeError:
+                                # If inner parse also fails, try to resync by putting the full data back
+                                # to the buffer and continue (we'll attempt to read as a fresh frame).
+                                self._recv_buf[:0] = data
+                                continue
+                        else:
+                            # Case B: we do not have the full inner frame yet. Put the bytes back and fill more.
+                            self._recv_buf[:0] = data
+                            # Loop will reiterate, see the inner header at the front, and request more bytes.
+                            continue
+
+                # Fallback 2: No obvious nested header or recovery failed; record and continue.
                 self.decode_failures += 1
                 hex_head = data[:16].hex()
                 ts = time.time()
