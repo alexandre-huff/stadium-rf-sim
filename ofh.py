@@ -52,6 +52,8 @@ class Ofh:
         except Exception as e:
             print(f"Warning: Unable to ensure logs directory exists: {e}")
         self.__power_log_file = os.path.join(logs_dir, f"cell_power_changes_{timestamp}.csv")
+        # Threshold in dB to consider power changed; avoids duplicate CSV rows on identical updates
+        self.__power_change_epsilon = 1e-3
         # Build header dynamically: Time + one column per PCI in sorted order
         try:
             self.__pci_order = sorted([ru.pci for ru in self.__sim.radio_units])
@@ -342,12 +344,24 @@ class Ofh:
                     print("Received TX Reference Level Request Message")
                     pci = msg.tx_reference_level_request.cell.pci
                     gain = msg.tx_reference_level_request.cell.gain
-                    print(f"Updating TX Reference Level for Cell pci={pci} to {gain} dBm")
-                    status, ue_list = self.__sim.set_ru_power(pci, gain)
-                    
-                    # Log a full snapshot row to CSV when any cell power changes
-                    if status:
-                        self.__log_power_change()
+                    # Map PCI to RU index; do not assume PCI == list index
+                    ru_idx = self.__sim.get_ru_index_by_pci(pci)
+                    if ru_idx is None:
+                        print(f"Invalid PCI in TX Reference Level Request: pci={pci}")
+                        status, ue_list = False, []
+                    else:
+                        current_power = self.__sim.radio_units[ru_idx].tx_power
+                        changed = abs(float(current_power) - float(gain)) > self.__power_change_epsilon
+                        if changed:
+                            print(f"Updating TX Reference Level for Cell pci={pci} to {gain} dBm")
+                            status, ue_list = self.__sim.set_ru_power(ru_idx, gain)
+                            # Log a full snapshot row to CSV when any cell power changes
+                            if status:
+                                self.__log_power_change()
+                        else:
+                            # No-op: same power requested; avoid duplicate CSV row
+                            print(f"TX Reference Level unchanged for pci={pci} (requested {gain} dBm matches current {current_power} dBm)")
+                            status, ue_list = True, []
                     
                     response = pb.OfhMessage()
                     response.tx_reference_level_response.cell.pci = pci

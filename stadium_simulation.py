@@ -105,6 +105,30 @@ class StadiumSimulation:
         """Get the list of UEs in the simulation"""
         return self.ues
 
+    # --- RU lookup helpers -------------------------------------------------
+    def get_ru_index_by_pci(self, pci: int) -> int | None:
+        """Return the index of the RadioUnit with the given PCI, or None if not found.
+
+        Note: PCI is a stable cell identifier and must not be assumed to equal
+        the position of the RU in the internal list.
+        """
+        for idx, ru in enumerate(self.radio_units):
+            if ru.pci == pci:
+                return idx
+        return None
+
+    def set_ru_power_by_pci(self, pci: int, power: float) -> tuple[bool, List[UE]]:
+        """Set RU power using PCI instead of list index.
+
+        This avoids relying on PCI == list index, which may not hold across runs
+        or configurations.
+        """
+        idx = self.get_ru_index_by_pci(pci)
+        if idx is None:
+            print(f"Target Cell with PCI {pci} not found")
+            return False, []
+        return self.set_ru_power(idx, power)
+
     def add_ues(self, num_ues) -> list:
         """Add a specified number of new UEs to the stadium simulation"""
         added_ues = []
@@ -232,6 +256,17 @@ class StadiumSimulation:
         if ru_idx < 0 or ru_idx >= len(self.radio_units):
             print(f"Invalid radio unit index: {ru_idx}")
             return False, []
+
+        # Early exit if the requested power matches current power (no-op)
+        try:
+            current_power = float(self.radio_units[ru_idx].tx_power)
+            requested_power = float(power)
+        except Exception:
+            current_power = self.radio_units[ru_idx].tx_power
+            requested_power = power
+        if abs(current_power - requested_power) <= 1e-3:
+            # No change; skip recomputing UE metrics
+            return True, []
 
         self.radio_units[ru_idx].set_tx_power(power)
         # Recalculate signal metrics for all UEs connected on this RU and only
