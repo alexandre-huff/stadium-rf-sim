@@ -17,13 +17,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.lines import Line2D
 from typing import List
 from stadium_tier import StadiumTier
 from radio_unit import RadioUnit
 from user_equipment import UE
 
 class StadiumSimulation:
-    def __init__(self):
+    def __init__(self, distance_scale: float = 1.1):  # default 10% outward scaling
         # Stadium dimensions (in meters)
         self.field_length = 105  # Standard football field length
         self.field_width = 68    # Standard football field width
@@ -62,17 +63,14 @@ class StadiumSimulation:
 
         # Initialize radio units with default power and incrementing channels
         # Generate 56 radio units distributed around the stadium perimeter
-        ru_positions = []
+        ru_positions: list[list[float]] = []
         num_rus = 56
-        
-        # Calculate stadium perimeter positions
-        perimeter_distance = 2 * (self.field_length + self.field_width) + 8 * 5  # Add extra for corners
-        ru_spacing = perimeter_distance / num_rus
-        
-        # Generate positions around the perimeter
+
+        # Store scale factor (applied to x,y coordinates)
+        self.distance_scale = distance_scale
+
         for i in range(num_rus):
             angle = (2 * np.pi * i) / num_rus
-            
             # Position RUs at varying distances around the stadium
             if i % 4 == 0:  # Every 4th RU closer to field
                 distance_x = self.field_length/2 + 5
@@ -86,16 +84,14 @@ class StadiumSimulation:
             else:  # Furthest from field
                 distance_x = self.field_length/2 + 15
                 distance_y = self.field_width/2 + 15
-            
-            x = distance_x * np.cos(angle)
-            y = distance_y * np.sin(angle)
+
+            x = distance_x * np.cos(angle) * self.distance_scale
+            y = distance_y * np.sin(angle) * self.distance_scale
             z = self.bs_height
-            
             ru_positions.append([x, y, z])
 
         self.radio_units: List[RadioUnit] = []
         for i, (x, y, z) in enumerate(ru_positions):
-            # Calculate channel start frequency for this RU
             channel_frequency = self.frequency + (i * self.channel_bandwidth)
             self.radio_units.append(RadioUnit(x, y, z, self.bs_tx_power, channel_frequency, self.channel_bandwidth))
 
@@ -279,8 +275,35 @@ class StadiumSimulation:
 
         return True, metric_ues
 
-    def visualize_stadium(self):
-        """Visualize the stadium layout with UE distribution and signal strength"""
+    def visualize_stadium(self,
+                          save_path: str | None = None,
+                          show: bool = True,
+                          annotate_rus: bool = True,
+                          base_marker_size: int = 5,
+                          dpi: int = 120,
+                          show_legend: bool = True,
+                          show_tier_info: bool = False,
+                          show_title: bool = False,
+                          base_font_size: int = 14,
+                          legend_ue_size: int = 16,
+                          legend_ru_size: int = 14,
+                          pdf_path: str | None = None):
+        """Visualize the stadium layout with UE distribution and signal strength.
+
+        Args:
+            save_path: If provided, saves the figure to this path instead of (or in addition to) showing it.
+            show: Whether to display the figure in an interactive window (ignored in headless environments).
+            annotate_rus: If True adds per-RU annotations (can clutter with many RUs).
+            base_marker_size: Base marker size for UEs (scaled lightly by UE height). Default 5 is suitable for thousands of UEs.
+            dpi: Figure DPI when saving.
+            show_legend: If True, adds a legend for UE and Radio Unit markers (default True for clarity).
+            show_tier_info: If True, shows tier configuration text box (default False for cleaner image).
+            show_title: If True, shows the plot title (default False for publication-ready minimalist figure).
+            base_font_size: Base font size for plot elements (ticks/legend/annotations); title slightly larger.
+            legend_ue_size: Marker size (points) for UE symbol in legend (visual emphasis).
+            legend_ru_size: Marker size (points) for RU symbol in legend.
+            pdf_path: Optional path to also save a vector PDF copy of the figure.
+        """
         # Store data for visualization
         self.ue_positions = np.array([[ue.x, ue.y] for ue in self.ues]).T
         self.ue_heights = np.array([ue.z for ue in self.ues])
@@ -290,7 +313,7 @@ class StadiumSimulation:
             print("No UEs to visualize")
             return
 
-        plt.figure(figsize=(15, 10))
+        plt.figure(figsize=(15, 10), dpi=dpi)
 
         # Plot field
         field_rect = plt.Rectangle((-self.field_length/2, -self.field_width/2),
@@ -308,38 +331,89 @@ class StadiumSimulation:
         plt.gca().add_patch(tech_area_rect)
 
         # Create custom colormap for signal strength
-        colors = ['red', 'yellow', 'green']
+        colors = ['red', 'yellow', 'blue']
         n_bins = 100
         cmap = LinearSegmentedColormap.from_list('signal_strength', colors, N=n_bins)
 
         # Plot UEs with signal strength color coding and size based on height
+        # Adaptive marker sizing: for large populations keep size small
+        n_ues = len(self.ues)
+        if n_ues > 5000:
+            size = base_marker_size
+            alpha = 0.4
+        elif n_ues > 2000:
+            size = base_marker_size + 2
+            alpha = 0.5
+        else:
+            size = base_marker_size + 5
+            alpha = 0.6
         scatter = plt.scatter(self.ue_positions[0], self.ue_positions[1],
-                            c=self.ue_signal_strength, cmap=cmap,
-                            s=30 + self.ue_heights/2, alpha=0.6,
-                            vmin=0, vmax=-100) # vmin and vmax set by Huff
+                              c=self.ue_signal_strength, cmap=cmap,
+                              s=size + (self.ue_heights - np.min(self.ue_heights, initial=0)) * 0.2,
+                              alpha=alpha,
+                              vmin=0, vmax=-100)  # vmin and vmax set by Huff
 
         # Plot radio units with their IDs, power levels, and channel info
+        ru_handle = None
         for i, ru in enumerate(self.radio_units):
-            plt.scatter(ru.x, ru.y, marker='^', color='black', s=100)
-            plt.annotate(f'RU{i}(Cell{i})\n{ru.tx_power}dBm\n{ru.channel_frequency}-{ru.channel_end_freq}MHz',
-                        (ru.x, ru.y),
-                        xytext=(5, 5),
-                        textcoords='offset points',
-                        fontsize=8)
+            handle = plt.scatter(ru.x, ru.y, marker='^', color='black', s=80)
+            if ru_handle is None:
+                ru_handle = handle
+            if annotate_rus:
+                plt.annotate(f'RU{i}(Cell{i})\n{ru.tx_power}dBm\n{ru.channel_frequency}-{ru.channel_end_freq}MHz',
+                             (ru.x, ru.y),
+                             xytext=(4, 4),
+                             textcoords='offset points',
+                             fontsize=7)
 
-        plt.colorbar(scatter, label='Reference Signal Received Power (dBm)')
+        cbar = plt.colorbar(scatter, label='Reference Signal Received Power (dBm)')
+        cbar.ax.tick_params(labelsize=base_font_size - 1)
+        cbar.set_label('Reference Signal Received Power (dBm)', size=base_font_size)
         plt.axis('equal')
         plt.grid(True)
-        plt.title('Stadium Layout with 5G Coverage\n(UMi Street Canyon Model with Shadowing and Multi-tier Structure)')
-        # plt.legend()
+        if show_title:
+            plt.title('Stadium Layout with 5G Coverage\n(UMi Street Canyon Model with Shadowing and Multi-tier Structure)',
+                      fontsize=base_font_size + 2)
 
-        # Add tier information to the plot
-        tier_info = f"Stadium Configuration:\n"
-        for i, tier in enumerate(self.tiers, 1):
-            tier_info += f"Tier {i}: {tier.height}m height, {tier.angle}° angle\n"
-        plt.figtext(0.02, 0.02, tier_info, fontsize=8, bbox=dict(facecolor='white', alpha=0.8))
+        if show_tier_info:
+            tier_info = f"Stadium Configuration:\n"
+            for i, tier in enumerate(self.tiers, 1):
+                tier_info += f"Tier {i}: {tier.height}m height, {tier.angle}° angle\n"
+            plt.figtext(0.02, 0.02, tier_info, fontsize=base_font_size - 2,
+                        bbox=dict(facecolor='white', alpha=0.8))
 
-        plt.show()
+        if show_legend:
+            # Build proxy artists with larger markers for clarity
+            # Derive a representative UE color (use middle color of colormap if none plotted)
+            if len(self.ue_signal_strength) > 0:
+                # Use colormap at mean value
+                norm_val = (np.mean(self.ue_signal_strength) - 0) / (-100 - 0)  # based on vmin=0, vmax=-100
+                norm_val = np.clip(norm_val, 0, 1)
+                ue_color = cmap(norm_val)
+            else:
+                ue_color = 'green'
+            ue_proxy = Line2D([0], [0], marker='o', linestyle='None', markersize=legend_ue_size,
+                              markerfacecolor=ue_color, markeredgecolor='black', alpha=0.7)
+            ru_proxy = Line2D([0], [0], marker='^', linestyle='None', markersize=legend_ru_size,
+                              markerfacecolor='black', markeredgecolor='black', alpha=0.9)
+            handles = [ue_proxy, ru_proxy]
+            labels = ['UE', 'Radio Unit']
+            plt.legend(handles, labels, loc='upper right', framealpha=0.9,
+                       prop={'size': base_font_size})
+
+        # Adjust tick label sizes
+        ax = plt.gca()
+        ax.tick_params(axis='both', which='major', labelsize=base_font_size - 1)
+
+        if save_path:
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
+        if pdf_path:
+            plt.savefig(pdf_path, dpi=dpi, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
         self.print_coverage_stats()
 
     def print_coverage_stats(self):
