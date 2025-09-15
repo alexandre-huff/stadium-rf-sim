@@ -331,7 +331,7 @@ class StadiumSimulation:
         plt.gca().add_patch(tech_area_rect)
 
         # Create custom colormap for signal strength
-        colors = ['red', 'yellow', 'blue']
+        colors = ['red', 'yellow', 'green']
         n_bins = 100
         cmap = LinearSegmentedColormap.from_list('signal_strength', colors, N=n_bins)
 
