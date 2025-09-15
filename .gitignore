@@ -3,3 +3,4 @@ __pycache__
 proto*
 logs/*
 *.pid
+.github/*
