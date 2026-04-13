@@ -18,7 +18,8 @@ def parse_args():
     p.add_argument('--ues', type=int, default=8192, help='Number of UEs to add (default: 8192)')
     p.add_argument('--output', type=str, default='plots/stadium_8192_ues.png', help='Output image path')
     p.add_argument('--no-show', action='store_true', help='Do not display the figure')
-    p.add_argument('--no-annot', action='store_true', help='Disable RU annotations (faster / cleaner)')
+    p.add_argument('--annot', action='store_true', help='Enable RU annotations')
+    p.add_argument('--no-height-lines', action='store_true', help='Disable stadium height lines')
     p.add_argument('--dpi', type=int, default=160, help='Figure DPI when saving')
     p.add_argument('--legend-ue-size', type=int, default=22, help='Legend UE marker size (points)')
     p.add_argument('--legend-ru-size', type=int, default=18, help='Legend RU marker size (points)')
@@ -37,7 +38,8 @@ def main():
     pdf_out = out_path.with_suffix('.pdf')
     sim.visualize_stadium(save_path=str(out_path),
                           show=not args.no_show,
-                          annotate_rus=not args.no_annot,
+                          annotate_rus=args.annot,
+                          show_stadium_height=not args.no_height_lines,
                           base_marker_size=4,
                           dpi=args.dpi,
                           show_legend=True,

@@ -18,6 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
+from matplotlib.patches import Ellipse
 from typing import List
 from stadium_tier import StadiumTier
 from radio_unit import RadioUnit
@@ -62,33 +63,44 @@ class StadiumSimulation:
         self.shadow_std_nlos = 7.8   # Standard deviation for NLOS shadow fading
 
         # Initialize radio units with default power and incrementing channels
-        # Generate 56 radio units distributed around the stadium perimeter
+        # Generate 56 radio units distributed across the tiers
         ru_positions: list[list[float]] = []
         num_rus = 56
 
         # Store scale factor (applied to x,y coordinates)
         self.distance_scale = distance_scale
 
-        for i in range(num_rus):
-            angle = (2 * np.pi * i) / num_rus
-            # Position RUs at varying distances around the stadium
-            if i % 4 == 0:  # Every 4th RU closer to field
-                distance_x = self.field_length/2 + 5
-                distance_y = self.field_width/2 + 5
-            elif i % 4 == 1:  # Slightly further
-                distance_x = self.field_length/2 + 8
-                distance_y = self.field_width/2 + 8
-            elif i % 4 == 2:  # Medium distance
-                distance_x = self.field_length/2 + 12
-                distance_y = self.field_width/2 + 12
-            else:  # Furthest from field
-                distance_x = self.field_length/2 + 15
-                distance_y = self.field_width/2 + 15
+        # Distribute RUs among tiers
+        rus_per_tier = [num_rus // len(self.tiers)] * len(self.tiers)
+        for i in range(num_rus % len(self.tiers)):
+            rus_per_tier[i] += 1
+            
+        current_depth_offset = 0
+        base_a = self.field_length/2 + self.technical_area_width
+        base_b = self.field_width/2 + self.technical_area_width
 
-            x = distance_x * np.cos(angle) * self.distance_scale
-            y = distance_y * np.sin(angle) * self.distance_scale
-            z = self.bs_height
-            ru_positions.append([x, y, z])
+        for tier_idx, tier in enumerate(self.tiers):
+            n_tier_rus = rus_per_tier[tier_idx]
+            
+            for i in range(n_tier_rus):
+                angle = (2 * np.pi * i) / n_tier_rus
+                
+                # Place RU in the middle of the tier depth
+                dist_from_base = current_depth_offset + (tier.depth / 2)
+                
+                radius_x = (base_a + dist_from_base)
+                radius_y = (base_b + dist_from_base)
+                
+                x = radius_x * np.cos(angle)
+                y = radius_y * np.sin(angle)
+                
+                # Calculate height: surface height at that depth + offset (e.g. 5m pole)
+                height_at_depth = tier.height + (tier.depth / 2) * np.tan(np.radians(tier.angle))
+                z = height_at_depth + 5
+                
+                ru_positions.append([x, y, z])
+            
+            current_depth_offset += tier.depth
 
         self.radio_units: List[RadioUnit] = []
         for i, (x, y, z) in enumerate(ru_positions):
@@ -142,6 +154,8 @@ class StadiumSimulation:
         ues_per_tier = num_ues // len(self.tiers)
         remaining_ues = num_ues % len(self.tiers)
 
+        current_depth_offset = 0
+
         for tier_idx, tier in enumerate(self.tiers):
             # Add extra UE to this tier if we have remaining ones
             tier_ues = ues_per_tier + (1 if tier_idx < remaining_ues else 0)
@@ -158,10 +172,10 @@ class StadiumSimulation:
 
                 # Generate random distance along tier depth
                 depth_fraction = np.random.uniform(0, 1)
-                distance = depth_fraction * tier.depth
+                distance = current_depth_offset + depth_fraction * tier.depth
 
                 # Calculate actual position including tier angle
-                height_increase = distance * np.tan(np.radians(tier.angle))
+                height_increase = (depth_fraction * tier.depth) * np.tan(np.radians(tier.angle))
                 x = base_x + distance * np.cos(angle)
                 y = base_y + distance * np.sin(angle)
                 z = base_height + height_increase
@@ -172,6 +186,8 @@ class StadiumSimulation:
                     y_positions.append(y)
                     z_positions.append(z)
                     current_tier_ues += 1
+            
+            current_depth_offset += tier.depth
 
         # Create UE objects and calculate their signal metrics
         for i in range(len(x_positions)):
@@ -278,12 +294,13 @@ class StadiumSimulation:
     def visualize_stadium(self,
                           save_path: str | None = None,
                           show: bool = True,
-                          annotate_rus: bool = True,
+                          annotate_rus: bool = False,
                           base_marker_size: int = 5,
                           dpi: int = 120,
                           show_legend: bool = True,
                           show_tier_info: bool = False,
                           show_title: bool = False,
+                          show_stadium_height: bool = True,
                           base_font_size: int = 14,
                           legend_ue_size: int = 16,
                           legend_ru_size: int = 14,
@@ -329,6 +346,63 @@ class StadiumSimulation:
             self.field_width + 2*self.technical_area_width,
             facecolor='gray', alpha=0.3)
         plt.gca().add_patch(tech_area_rect)
+
+        if show_stadium_height:
+            # Base dimensions for the inner edge of the tiers
+            base_a = self.field_length/2 + self.technical_area_width
+            base_b = self.field_width/2 + self.technical_area_width
+
+            # Draw inner boundary (common for all tiers)
+            inner_ellipse = Ellipse((0, 0), 2*base_a, 2*base_b,
+                                    fill=False, edgecolor='black', linestyle='--', linewidth=1)
+            plt.gca().add_patch(inner_ellipse)
+
+            # Draw outer boundaries for each tier
+            # Stagger angles to avoid label overlap: Tier 1 (Top-Right), Tier 2 (Top-Left), Tier 3 (Bottom-Left)
+            label_angles = [45, 135, 225]
+            
+            current_depth_offset = 0
+
+            for i, tier in enumerate(self.tiers):
+                d = tier.depth
+                width = 2 * (base_a + current_depth_offset + d)
+                height = 2 * (base_b + current_depth_offset + d)
+
+                # Calculate max height for this tier
+                max_h = tier.height + d * np.tan(np.radians(tier.angle))
+
+                # Draw ellipse for the outer edge of the tier
+                ellipse = Ellipse((0, 0), width, height,
+                                  fill=False, edgecolor='gray', linestyle=':', linewidth=1.5)
+                plt.gca().add_patch(ellipse)
+
+                # Add label indicating the height range
+                label_text = f"Tier {i+1}\n{tier.height}m-{max_h:.0f}m"
+                
+                # Calculate position based on staggered angle
+                angle_deg = label_angles[i % len(label_angles)]
+                angle_rad = np.radians(angle_deg)
+                
+                # Point on the ellipse boundary
+                target_x = (base_a + current_depth_offset + d) * np.cos(angle_rad)
+                target_y = (base_b + current_depth_offset + d) * np.sin(angle_rad)
+                
+                # Text position (offset outward)
+                offset = 30
+                text_x = target_x + offset * np.cos(angle_rad)
+                text_y = target_y + offset * np.sin(angle_rad)
+
+                # Draw annotation with arrow
+                plt.annotate(label_text,
+                             xy=(target_x, target_y),
+                             xytext=(text_x, text_y),
+                             arrowprops=dict(arrowstyle="->", color='black', lw=2.0),
+                             ha='center', va='center', 
+                             fontsize=base_font_size, 
+                             color='black', 
+                             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.8))
+                
+                current_depth_offset += d
 
         # Create custom colormap for signal strength
         colors = ['red', 'yellow', 'green']
@@ -379,7 +453,7 @@ class StadiumSimulation:
             tier_info = f"Stadium Configuration:\n"
             for i, tier in enumerate(self.tiers, 1):
                 tier_info += f"Tier {i}: {tier.height}m height, {tier.angle}° angle\n"
-            plt.figtext(0.02, 0.02, tier_info, fontsize=base_font_size - 2,
+            plt.figtext(0.02, 0.02, tier_info, fontsize=base_font_size,
                         bbox=dict(facecolor='white', alpha=0.8))
 
         if show_legend:
