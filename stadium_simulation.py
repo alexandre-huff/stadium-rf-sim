@@ -17,13 +17,15 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.lines import Line2D
+from matplotlib.patches import Ellipse
 from typing import List
 from stadium_tier import StadiumTier
 from radio_unit import RadioUnit
 from user_equipment import UE
 
 class StadiumSimulation:
-    def __init__(self):
+    def __init__(self, distance_scale: float = 1.1):  # default 10% outward scaling
         # Stadium dimensions (in meters)
         self.field_length = 105  # Standard football field length
         self.field_width = 68    # Standard football field width
@@ -61,20 +63,47 @@ class StadiumSimulation:
         self.shadow_std_nlos = 7.8   # Standard deviation for NLOS shadow fading
 
         # Initialize radio units with default power and incrementing channels
-        ru_positions = [
-            [-self.field_length/2 - 5, -self.field_width/4, self.bs_height],   # West side 1
-            [-self.field_length/2 - 5, self.field_width/4, self.bs_height],    # West side 2
-            [self.field_length/2 + 5, -self.field_width/4, self.bs_height],    # East side 1
-            [self.field_length/2 + 5, self.field_width/4, self.bs_height],     # East side 2
-            [-self.field_length/4, -self.field_width/2 - 5, self.bs_height],   # South side 1
-            [self.field_length/4, -self.field_width/2 - 5, self.bs_height],    # South side 2
-            [-self.field_length/4, self.field_width/2 + 5, self.bs_height],    # North side 1
-            [self.field_length/4, self.field_width/2 + 5, self.bs_height]      # North side 2
-        ]
+        # Generate 56 radio units distributed across the tiers
+        ru_positions: list[list[float]] = []
+        num_rus = 56
+
+        # Store scale factor (applied to x,y coordinates)
+        self.distance_scale = distance_scale
+
+        # Distribute RUs among tiers
+        rus_per_tier = [num_rus // len(self.tiers)] * len(self.tiers)
+        for i in range(num_rus % len(self.tiers)):
+            rus_per_tier[i] += 1
+            
+        current_depth_offset = 0
+        base_a = self.field_length/2 + self.technical_area_width
+        base_b = self.field_width/2 + self.technical_area_width
+
+        for tier_idx, tier in enumerate(self.tiers):
+            n_tier_rus = rus_per_tier[tier_idx]
+            
+            for i in range(n_tier_rus):
+                angle = (2 * np.pi * i) / n_tier_rus
+                
+                # Place RU in the middle of the tier depth
+                dist_from_base = current_depth_offset + (tier.depth / 2)
+                
+                radius_x = (base_a + dist_from_base)
+                radius_y = (base_b + dist_from_base)
+                
+                x = radius_x * np.cos(angle)
+                y = radius_y * np.sin(angle)
+                
+                # Calculate height: surface height at that depth + offset (e.g. 5m pole)
+                height_at_depth = tier.height + (tier.depth / 2) * np.tan(np.radians(tier.angle))
+                z = height_at_depth + 5
+                
+                ru_positions.append([x, y, z])
+            
+            current_depth_offset += tier.depth
 
         self.radio_units: List[RadioUnit] = []
         for i, (x, y, z) in enumerate(ru_positions):
-            # Calculate channel start frequency for this RU
             channel_frequency = self.frequency + (i * self.channel_bandwidth)
             self.radio_units.append(RadioUnit(x, y, z, self.bs_tx_power, channel_frequency, self.channel_bandwidth))
 
@@ -83,6 +112,30 @@ class StadiumSimulation:
     def get_ues(self) -> List[UE]:
         """Get the list of UEs in the simulation"""
         return self.ues
+
+    # --- RU lookup helpers -------------------------------------------------
+    def get_ru_index_by_pci(self, pci: int) -> int | None:
+        """Return the index of the RadioUnit with the given PCI, or None if not found.
+
+        Note: PCI is a stable cell identifier and must not be assumed to equal
+        the position of the RU in the internal list.
+        """
+        for idx, ru in enumerate(self.radio_units):
+            if ru.pci == pci:
+                return idx
+        return None
+
+    def set_ru_power_by_pci(self, pci: int, power: float) -> tuple[bool, List[UE]]:
+        """Set RU power using PCI instead of list index.
+
+        This avoids relying on PCI == list index, which may not hold across runs
+        or configurations.
+        """
+        idx = self.get_ru_index_by_pci(pci)
+        if idx is None:
+            print(f"Target Cell with PCI {pci} not found")
+            return False, []
+        return self.set_ru_power(idx, power)
 
     def add_ues(self, num_ues) -> list:
         """Add a specified number of new UEs to the stadium simulation"""
@@ -101,6 +154,8 @@ class StadiumSimulation:
         ues_per_tier = num_ues // len(self.tiers)
         remaining_ues = num_ues % len(self.tiers)
 
+        current_depth_offset = 0
+
         for tier_idx, tier in enumerate(self.tiers):
             # Add extra UE to this tier if we have remaining ones
             tier_ues = ues_per_tier + (1 if tier_idx < remaining_ues else 0)
@@ -117,10 +172,10 @@ class StadiumSimulation:
 
                 # Generate random distance along tier depth
                 depth_fraction = np.random.uniform(0, 1)
-                distance = depth_fraction * tier.depth
+                distance = current_depth_offset + depth_fraction * tier.depth
 
                 # Calculate actual position including tier angle
-                height_increase = distance * np.tan(np.radians(tier.angle))
+                height_increase = (depth_fraction * tier.depth) * np.tan(np.radians(tier.angle))
                 x = base_x + distance * np.cos(angle)
                 y = base_y + distance * np.sin(angle)
                 z = base_height + height_increase
@@ -131,6 +186,8 @@ class StadiumSimulation:
                     y_positions.append(y)
                     z_positions.append(z)
                     current_tier_ues += 1
+            
+            current_depth_offset += tier.depth
 
         # Create UE objects and calculate their signal metrics
         for i in range(len(x_positions)):
@@ -212,18 +269,58 @@ class StadiumSimulation:
             print(f"Invalid radio unit index: {ru_idx}")
             return False, []
 
+        # Early exit if the requested power matches current power (no-op)
+        try:
+            current_power = float(self.radio_units[ru_idx].tx_power)
+            requested_power = float(power)
+        except Exception:
+            current_power = self.radio_units[ru_idx].tx_power
+            requested_power = power
+        if abs(current_power - requested_power) <= 1e-3:
+            # No change; skip recomputing UE metrics
+            return True, []
+
         self.radio_units[ru_idx].set_tx_power(power)
         # Recalculate signal metrics for all UEs connected on this RU and only
         # compute for this RU since signal power of the other RUs did not change.
         metric_ues: List[UE] = []
-        for ue in self.radio_units[ru_idx].connected_ues:
+        # Create a copy of the set to avoid "Set changed size during iteration" error
+        for ue in list(self.radio_units[ru_idx].connected_ues):
             ue.calculate_signal_metrics(self.radio_units)
             metric_ues.append(ue)
 
         return True, metric_ues
 
-    def visualize_stadium(self):
-        """Visualize the stadium layout with UE distribution and signal strength"""
+    def visualize_stadium(self,
+                          save_path: str | None = None,
+                          show: bool = True,
+                          annotate_rus: bool = False,
+                          base_marker_size: int = 5,
+                          dpi: int = 120,
+                          show_legend: bool = True,
+                          show_tier_info: bool = False,
+                          show_title: bool = False,
+                          show_stadium_height: bool = True,
+                          base_font_size: int = 14,
+                          legend_ue_size: int = 16,
+                          legend_ru_size: int = 14,
+                          pdf_path: str | None = None):
+        """Visualize the stadium layout with UE distribution and signal strength.
+
+        Args:
+            save_path: If provided, saves the figure to this path instead of (or in addition to) showing it.
+            show: Whether to display the figure in an interactive window (ignored in headless environments).
+            annotate_rus: If True adds per-RU annotations (can clutter with many RUs).
+            base_marker_size: Base marker size for UEs (scaled lightly by UE height). Default 5 is suitable for thousands of UEs.
+            dpi: Figure DPI when saving.
+            show_legend: If True, adds a legend for UE and Radio Unit markers (default True for clarity).
+            show_tier_info: If True, shows tier configuration text box (default False for cleaner image).
+            show_title: If True, shows the plot title (default False for publication-ready minimalist figure).
+            base_font_size: Base font size for plot elements (ticks/legend/annotations); title slightly larger.
+            legend_ue_size: Marker size (points) for UE symbol in legend (visual emphasis).
+            legend_ru_size: Marker size (points) for RU symbol in legend.
+            pdf_path: Optional path to also save a vector PDF copy of the figure.
+        """
         # Store data for visualization
         self.ue_positions = np.array([[ue.x, ue.y] for ue in self.ues]).T
         self.ue_heights = np.array([ue.z for ue in self.ues])
@@ -233,7 +330,7 @@ class StadiumSimulation:
             print("No UEs to visualize")
             return
 
-        plt.figure(figsize=(15, 10))
+        plt.figure(figsize=(15, 10), dpi=dpi)
 
         # Plot field
         field_rect = plt.Rectangle((-self.field_length/2, -self.field_width/2),
@@ -250,39 +347,147 @@ class StadiumSimulation:
             facecolor='gray', alpha=0.3)
         plt.gca().add_patch(tech_area_rect)
 
+        if show_stadium_height:
+            # Base dimensions for the inner edge of the tiers
+            base_a = self.field_length/2 + self.technical_area_width
+            base_b = self.field_width/2 + self.technical_area_width
+
+            # Draw inner boundary (common for all tiers)
+            inner_ellipse = Ellipse((0, 0), 2*base_a, 2*base_b,
+                                    fill=False, edgecolor='black', linestyle='--', linewidth=1)
+            plt.gca().add_patch(inner_ellipse)
+
+            # Draw outer boundaries for each tier
+            # Stagger angles to avoid label overlap: Tier 1 (Top-Right), Tier 2 (Top-Left), Tier 3 (Bottom-Left)
+            label_angles = [45, 135, 225]
+            
+            current_depth_offset = 0
+
+            for i, tier in enumerate(self.tiers):
+                d = tier.depth
+                width = 2 * (base_a + current_depth_offset + d)
+                height = 2 * (base_b + current_depth_offset + d)
+
+                # Calculate max height for this tier
+                max_h = tier.height + d * np.tan(np.radians(tier.angle))
+
+                # Draw ellipse for the outer edge of the tier
+                ellipse = Ellipse((0, 0), width, height,
+                                  fill=False, edgecolor='gray', linestyle=':', linewidth=1.5)
+                plt.gca().add_patch(ellipse)
+
+                # Add label indicating the height range
+                label_text = f"Tier {i+1}\n{tier.height}m-{max_h:.0f}m"
+                
+                # Calculate position based on staggered angle
+                angle_deg = label_angles[i % len(label_angles)]
+                angle_rad = np.radians(angle_deg)
+                
+                # Point on the ellipse boundary
+                target_x = (base_a + current_depth_offset + d) * np.cos(angle_rad)
+                target_y = (base_b + current_depth_offset + d) * np.sin(angle_rad)
+                
+                # Text position (offset outward)
+                offset = 30
+                text_x = target_x + offset * np.cos(angle_rad)
+                text_y = target_y + offset * np.sin(angle_rad)
+
+                # Draw annotation with arrow
+                plt.annotate(label_text,
+                             xy=(target_x, target_y),
+                             xytext=(text_x, text_y),
+                             arrowprops=dict(arrowstyle="->", color='black', lw=2.0),
+                             ha='center', va='center', 
+                             fontsize=base_font_size, 
+                             color='black', 
+                             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="gray", alpha=0.8))
+                
+                current_depth_offset += d
+
         # Create custom colormap for signal strength
         colors = ['red', 'yellow', 'green']
         n_bins = 100
         cmap = LinearSegmentedColormap.from_list('signal_strength', colors, N=n_bins)
 
         # Plot UEs with signal strength color coding and size based on height
+        # Adaptive marker sizing: for large populations keep size small
+        n_ues = len(self.ues)
+        if n_ues > 5000:
+            size = base_marker_size
+            alpha = 0.4
+        elif n_ues > 2000:
+            size = base_marker_size + 2
+            alpha = 0.5
+        else:
+            size = base_marker_size + 5
+            alpha = 0.6
         scatter = plt.scatter(self.ue_positions[0], self.ue_positions[1],
-                            c=self.ue_signal_strength, cmap=cmap,
-                            s=30 + self.ue_heights/2, alpha=0.6,
-                            vmin=0, vmax=-100) # vmin and vmax set by Huff
+                              c=self.ue_signal_strength, cmap=cmap,
+                              s=size + (self.ue_heights - np.min(self.ue_heights, initial=0)) * 0.2,
+                              alpha=alpha,
+                              vmin=0, vmax=-100)  # vmin and vmax set by Huff
 
         # Plot radio units with their IDs, power levels, and channel info
+        ru_handle = None
         for i, ru in enumerate(self.radio_units):
-            plt.scatter(ru.x, ru.y, marker='^', color='black', s=100)
-            plt.annotate(f'RU{i}(Cell{i})\n{ru.tx_power}dBm\n{ru.channel_frequency}-{ru.channel_end_freq}MHz',
-                        (ru.x, ru.y),
-                        xytext=(5, 5),
-                        textcoords='offset points',
-                        fontsize=8)
+            handle = plt.scatter(ru.x, ru.y, marker='^', color='black', s=80)
+            if ru_handle is None:
+                ru_handle = handle
+            if annotate_rus:
+                plt.annotate(f'RU{i}(Cell{i})\n{ru.tx_power}dBm\n{ru.channel_frequency}-{ru.channel_end_freq}MHz',
+                             (ru.x, ru.y),
+                             xytext=(4, 4),
+                             textcoords='offset points',
+                             fontsize=7)
 
-        plt.colorbar(scatter, label='Reference Signal Received Power (dBm)')
+        cbar = plt.colorbar(scatter, label='Reference Signal Received Power (dBm)')
+        cbar.ax.tick_params(labelsize=base_font_size - 1)
+        cbar.set_label('Reference Signal Received Power (dBm)', size=base_font_size)
         plt.axis('equal')
         plt.grid(True)
-        plt.title('Stadium Layout with 5G Coverage\n(UMi Street Canyon Model with Shadowing and Multi-tier Structure)')
-        # plt.legend()
+        if show_title:
+            plt.title('Stadium Layout with 5G Coverage\n(UMi Street Canyon Model with Shadowing and Multi-tier Structure)',
+                      fontsize=base_font_size + 2)
 
-        # Add tier information to the plot
-        tier_info = f"Stadium Configuration:\n"
-        for i, tier in enumerate(self.tiers, 1):
-            tier_info += f"Tier {i}: {tier.height}m height, {tier.angle}° angle\n"
-        plt.figtext(0.02, 0.02, tier_info, fontsize=8, bbox=dict(facecolor='white', alpha=0.8))
+        if show_tier_info:
+            tier_info = f"Stadium Configuration:\n"
+            for i, tier in enumerate(self.tiers, 1):
+                tier_info += f"Tier {i}: {tier.height}m height, {tier.angle}° angle\n"
+            plt.figtext(0.02, 0.02, tier_info, fontsize=base_font_size,
+                        bbox=dict(facecolor='white', alpha=0.8))
 
-        plt.show()
+        if show_legend:
+            # Build proxy artists with larger markers for clarity
+            # Derive a representative UE color (use middle color of colormap if none plotted)
+            if len(self.ue_signal_strength) > 0:
+                # Use colormap at mean value
+                norm_val = (np.mean(self.ue_signal_strength) - 0) / (-100 - 0)  # based on vmin=0, vmax=-100
+                norm_val = np.clip(norm_val, 0, 1)
+                ue_color = cmap(norm_val)
+            else:
+                ue_color = 'green'
+            ue_proxy = Line2D([0], [0], marker='o', linestyle='None', markersize=legend_ue_size,
+                              markerfacecolor=ue_color, markeredgecolor='black', alpha=0.7)
+            ru_proxy = Line2D([0], [0], marker='^', linestyle='None', markersize=legend_ru_size,
+                              markerfacecolor='black', markeredgecolor='black', alpha=0.9)
+            handles = [ue_proxy, ru_proxy]
+            labels = ['UE', 'Radio Unit']
+            plt.legend(handles, labels, loc='upper right', framealpha=0.9,
+                       prop={'size': base_font_size})
+
+        # Adjust tick label sizes
+        ax = plt.gca()
+        ax.tick_params(axis='both', which='major', labelsize=base_font_size - 1)
+
+        if save_path:
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
+        if pdf_path:
+            plt.savefig(pdf_path, dpi=dpi, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
         self.print_coverage_stats()
 
     def print_coverage_stats(self):
@@ -356,12 +561,14 @@ class StadiumSimulation:
         metric_ues: List[UE] = []
         if success:
             # Recalculate metrics for all UEs on previous cell since interference patterns have changed
-            for ue in old_cell.connected_ues:
+            # Create a copy of the set to avoid "Set changed size during iteration" error
+            for ue in list(old_cell.connected_ues):
                 ue.calculate_signal_metrics(self.radio_units)
                 metric_ues.append(ue)
 
             # Recalculate metrics for all UEs on target cell since interference patterns have changed
-            for ue in target_cell.connected_ues:
+            # Create a copy of the set to avoid "Set changed size during iteration" error
+            for ue in list(target_cell.connected_ues):
                 ue.calculate_signal_metrics(self.radio_units)
                 metric_ues.append(ue)
 
