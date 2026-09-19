@@ -20,6 +20,12 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Ellipse
 from typing import List
+from frequency_plan import (
+    CHANNEL_BANDWIDTH_MHZ,
+    DEFAULT_CARRIER_POOL_MHZ,
+    build_frequency_reuse_plan,
+    total_unique_bandwidth_mhz,
+)
 from stadium_tier import StadiumTier
 from radio_unit import RadioUnit
 from user_equipment import UE
@@ -52,8 +58,13 @@ class StadiumSimulation:
         # Set the number of RUs based on a configuration file
 
         # 5G network parameters
-        self.frequency = 3500  # Starting frequency in MHz (3.5 GHz typical for 5G mid-band)
-        self.channel_bandwidth = 100  # Channel bandwidth in MHz
+        self.carrier_pool_mhz = DEFAULT_CARRIER_POOL_MHZ
+        self.frequency = min(self.carrier_pool_mhz)  # Lowest carrier in the configured pool
+        self.channel_bandwidth = CHANNEL_BANDWIDTH_MHZ
+        self.total_unique_bandwidth_mhz = total_unique_bandwidth_mhz(
+            self.channel_bandwidth,
+            self.carrier_pool_mhz,
+        )
         self.bs_height = 25   # Height of radio units in meters
         self.ue_height = 1.5  # Height of UEs in meters (when standing)
         self.bs_tx_power = 20 # Radio unit transmission power in dBm
@@ -102,9 +113,11 @@ class StadiumSimulation:
             
             current_depth_offset += tier.depth
 
+        channel_frequencies = build_frequency_reuse_plan(rus_per_tier, self.carrier_pool_mhz)
+
         self.radio_units: List[RadioUnit] = []
         for i, (x, y, z) in enumerate(ru_positions):
-            channel_frequency = self.frequency + (i * self.channel_bandwidth)
+            channel_frequency = channel_frequencies[i]
             self.radio_units.append(RadioUnit(x, y, z, self.bs_tx_power, channel_frequency, self.channel_bandwidth))
 
         self.ues: List[UE] = []  # List to store UE objects
