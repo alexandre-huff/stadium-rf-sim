@@ -8,6 +8,7 @@ packaging==24.2
 pandas
 pillow
 protobuf==5.29.4
+grpcio-tools==1.63.0
 pyparsing
 python-dateutil==2.9.0.post0
 setuptools

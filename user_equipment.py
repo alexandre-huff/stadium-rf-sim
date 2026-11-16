@@ -46,17 +46,19 @@ class UE:
         # Calculate thermal noise floor based on channel bandwidth
         # 3GPP TS 36.101: -174 dBm/Hz is the thermal noise density
         thermal_noise_density = -174  # dBm/Hz at 290K
+
+        if not radio_units:
+            self.rsrp_measurements = {}
+            self.rsrq_measurements = {}
+            self.sinr_measurements = {}
+            return
         
         # Calculate noise floor for the bandwidth
-        if self.connected_ru:
-            # Convert bandwidth from MHz to Hz
-            bandwidth_hz = self.connected_ru.channel_bandwidth * 1e6
-            noise_floor = thermal_noise_density + 10 * np.log10(bandwidth_hz)
-            # Number of resource blocks (assuming 180 kHz per RB for LTE)
-            num_rb = int(self.connected_ru.channel_bandwidth * 1e6 / 180e3)
-        else:
-            noise_floor = thermal_noise_density + 60  # Default 1 MHz
-            num_rb = 5  # Default 5 RBs
+        reference_ru = self.connected_ru if self.connected_ru is not None else radio_units[0]
+        bandwidth_hz = reference_ru.channel_bandwidth * 1e6
+        noise_floor = thermal_noise_density + 10 * np.log10(bandwidth_hz)
+        # Number of resource blocks (assuming 180 kHz per RB for LTE)
+        num_rb = int(reference_ru.channel_bandwidth * 1e6 / 180e3)
         
         # Calculate distances to all radio units
         distances = {ru: np.sqrt(
@@ -170,6 +172,24 @@ class UE:
 
         # Sort by RSRP
         return sorted(neighbor_metrics, key=lambda x: x['rsrp'], reverse=True)
+
+    def get_neighbor_ru_metrics_by_sinr(self) -> List[Dict[str, float]]:
+        """Get signal metrics for neighbor radio units sorted by SINR"""
+        if self.connected_ru is None:
+            return []
+
+        neighbor_metrics = []
+        for ru, rsrp in self.rsrp_measurements.items():
+            if ru != self.connected_ru:
+                neighbor_metrics.append({
+                    'radio_unit': ru,
+                    'rsrp': rsrp,
+                    'rsrq': self.rsrq_measurements[ru],
+                    'sinr': self.sinr_measurements[ru]
+                })
+
+        # Sort by SINR
+        return sorted(neighbor_metrics, key=lambda x: x['sinr'], reverse=True)
 
     def force_handoff(self, new_ru: RadioUnit) -> bool:
         """Force a handoff to a specific radio unit

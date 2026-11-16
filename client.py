@@ -15,89 +15,260 @@
 # ==================================================================================
 
 import socket
+import signal
+import time
+import json
 import proto.signaling_pb2 as pb
+from threading import Lock
 from google.protobuf import message, text_format
+
+# Helper placed before class to avoid forward reference issues
+def _safe_int_from_header(header: bytes) -> int:
+    """Best-effort integer representation of a 4-byte header for error messages.
+    Tries BE, LE, and ASCII decimal; returns -1 on failure.
+    """
+    try:
+        be = int.from_bytes(header, 'big')
+        if be >= 0:
+            return be
+    except Exception:
+        pass
+    try:
+        le = int.from_bytes(header, 'little')
+        if le >= 0:
+            return le
+    except Exception:
+        pass
+    try:
+        if all(48 <= b <= 57 for b in header):
+            return int(header.decode('ascii'))
+    except Exception:
+        pass
+    return -1
 
 class Client:
     """
         This class abstracts the OFH TCP connection to E2Sim
     """
 
+    def __init__(self):
+        self.sock = None  # type: socket.socket | None
+        self._addr = None  # type: str | None
+        self._port = None  # type: int | None
+        self._send_lock = Lock()
+        # Telemetry counters
+        self.decode_failures = 0
+        self.partial_frames = 0
+        self.total_received_bytes = 0
+        self.last_bad_frame_info = None  # type: dict | None
+        # Persistent receive buffer to handle TCP segmentation/coalescing
+        self._recv_buf = bytearray()
+
+        # Suppress SIGPIPE globally on POSIX so failed sends raise exceptions instead of killing the proc
+        if hasattr(signal, "SIGPIPE"):
+            try:
+                signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+            except Exception:
+                # Best-effort; ignore if not permitted in current context
+                pass
+
     def connect(self, addr: str, port: int):
         """Connects to a given server using a TCP socket
 
             :raises RuntimeError: If any error happens.
         """
+        # Close any previous socket before creating a new one
+        if getattr(self, 'sock', None):
+            try:
+                self.sock.close()
+            except Exception:
+                pass
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Enable TCP keepalive with sensible defaults (Linux)
         try:
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Tune keepalive parameters if available (Linux specific)
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except Exception:
+            # Non-fatal; proceed without keepalive tuning if not supported
+            pass
+        try:
+            self._addr, self._port = addr, port
             self.sock.connect((addr, port))
         except Exception as e:
             raise RuntimeError(f"Unable to open connection on {addr}:{port}. Cause: {e}")
 
-    def send(self, message: pb.OfhMessage):
+    def send(self, ofh_msg: pb.OfhMessage):
         """Send a message to the server
 
             :raises RuntimeError: If any error happens.
         """
-        data = message.SerializeToString()
-        size = message.ByteSize()
+        if self.sock is None:
+            raise RuntimeError("socket not connected")
 
-        data_len = size.to_bytes(4, byteorder='big')    # converting to network byte order
-        try:
-            sent = self.sock.send(data_len)
-            if sent == 0:
-                raise RuntimeError("socket connection broken")
-        except BrokenPipeError as e:
-            raise RuntimeError(f"{e}. socket connection broken")
+        data = ofh_msg.SerializeToString()
+        size = len(data)
 
-        total_sent = 0
-        while total_sent < size:
-            try:
-                sent = self.sock.send(data[total_sent:])
-                if sent == 0:
-                    raise RuntimeError("socket connection broken")
-                total_sent += sent
-            except BrokenPipeError as e:
-                raise RuntimeError(f"{e}. socket connection broken")
+        # Do not send zero-length frames; caller should avoid sending empty messages
+        if size == 0:
+            raise RuntimeError("refusing to send zero-length frame (empty OfhMessage)")
+
+        header = size.to_bytes(4, byteorder='big')  # 4-byte big-endian length prefix
+
+        # Prefer to suppress SIGPIPE per-send if available
+        send_flags = getattr(socket, 'MSG_NOSIGNAL', 0)
+
+        # Serialize multi-part frame writes to prevent interleaving across threads
+        with self._send_lock:
+            # Send header fully
+            total_sent = 0
+            while total_sent < 4:
+                try:
+                    sent = self.sock.send(header[total_sent:], send_flags)
+                    if sent == 0:
+                        raise RuntimeError("socket connection broken")
+                    total_sent += sent
+                except (BrokenPipeError, OSError) as e:
+                    raise RuntimeError(f"{e}. socket connection broken")
+
+            # Send payload fully
+            total_sent = 0
+            while total_sent < size:
+                try:
+                    sent = self.sock.send(data[total_sent:], send_flags)
+                    if sent == 0:
+                        raise RuntimeError("socket connection broken")
+                    total_sent += sent
+                except (BrokenPipeError, OSError) as e:
+                    raise RuntimeError(f"{e}. socket connection broken")
 
     def receive(self) -> pb.OfhMessage:
         """Receive a message from the server
 
             :raises RuntimeError: If any error happens.
         """
-        chunks = []
-        bytes_rcvd = 0
-        msg_len = self.sock.recv(4)
-        msg_len = int.from_bytes(msg_len, byteorder='big')        # converting to host byte order
+        if self.sock is None:
+            raise RuntimeError("socket not connected")
 
-        while bytes_rcvd < msg_len:
-            chunk = self.sock.recv(msg_len - bytes_rcvd)
-            if chunk == b'':
-                raise RuntimeError("socket connection broken")
-            chunks.append(chunk)
-            bytes_rcvd += len(chunk)
+        # Helper: ensure at least n bytes in buffer, otherwise read more.
+        def _fill_buf(n: int):
+            while len(self._recv_buf) < n:
+                try:
+                    chunk = self.sock.recv(max(1, n - len(self._recv_buf)))
+                except OSError as e:
+                    raise RuntimeError(f"socket recv error: {e}")
+                if chunk == b'':
+                    # Peer closed connection -> let caller handle reconnect
+                    self.partial_frames += 1
+                    raise RuntimeError("socket connection broken")
+                self._recv_buf.extend(chunk)
 
-        data = b''.join(chunks)
+        MAX_LEN = 10 * 1024 * 1024  # 10MB
 
-        msg = pb.OfhMessage()
-        try:
-            msg.ParseFromString(data)
-        except message.DecodeError as e:
-            print(f"Error decoding protobuf message: {e}")
+        # Strict 4-byte big-endian length-prefixed framing with resync on bad header
+        while True:
+            # Ensure we have a header
+            _fill_buf(4)
+            header = bytes(self._recv_buf[:4])
+            msg_len = int.from_bytes(header, 'big')
 
-        return msg
+            if not (1 <= msg_len <= MAX_LEN):
+                # Bad header: do not tear down; drop one byte and try to resync
+                # Optionally record minimal diagnostics for observability
+                self.partial_frames += 1
+                # Drop just the first byte and keep scanning
+                del self._recv_buf[:1]
+                continue
+
+            # We have a plausible frame; ensure entire payload is available
+            _fill_buf(4 + msg_len)
+            data = bytes(self._recv_buf[4:4 + msg_len])
+            # Only delete from buffer once we've successfully parsed or decided how to resync
+            del self._recv_buf[:4 + msg_len]
+            self.total_received_bytes += 4 + len(data)
+
+            # Try to decode protobuf payload
+            msg = pb.OfhMessage()
+            try:
+                msg.ParseFromString(data)
+                return msg
+            except message.DecodeError as e:
+                # Fallback 1: If payload itself starts with another plausible 4-byte length,
+                # treat it as an extra nested length prefix injected by peer.
+                if len(data) >= 4:
+                    inner_len = int.from_bytes(data[:4], 'big')
+                    if 1 <= inner_len <= MAX_LEN:
+                        # Case A: we already have a full inner frame inside this payload
+                        if inner_len <= len(data) - 4:
+                            inner_payload = data[4:4 + inner_len]
+                            tail = data[4 + inner_len:]
+                            try:
+                                msg2 = pb.OfhMessage()
+                                msg2.ParseFromString(inner_payload)
+                                # Prepend any tail bytes back to the recv buffer for next iteration
+                                if tail:
+                                    self._recv_buf[:0] = tail
+                                return msg2
+                            except message.DecodeError:
+                                # If inner parse also fails, try to resync by putting the full data back
+                                # to the buffer and continue (we'll attempt to read as a fresh frame).
+                                self._recv_buf[:0] = data
+                                continue
+                        else:
+                            # Case B: we do not have the full inner frame yet. Put the bytes back and fill more.
+                            self._recv_buf[:0] = data
+                            # Loop will reiterate, see the inner header at the front, and request more bytes.
+                            continue
+
+                # Fallback 2: No obvious nested header or recovery failed; record and continue.
+                self.decode_failures += 1
+                hex_head = data[:16].hex()
+                ts = time.time()
+                self.last_bad_frame_info = {
+                    "ts": ts,
+                    "msg_len": msg_len,
+                    "data_len": len(data),
+                    "hex_head": hex_head,
+                    "error": str(e),
+                    "hdr_hex": header.hex(),
+                }
+                print(json.dumps({
+                    "event": "protobuf_decode_error",
+                    "ts": ts,
+                    "msg_len": msg_len,
+                    "data_len": len(data),
+                    "hex_head": hex_head,
+                    "decode_failures": self.decode_failures,
+                    "hdr_hex": header.hex(),
+                }))
+                # Return empty message to allow caller to continue; connection stays up
+                return pb.OfhMessage()
 
     def disconnect(self):
         try:
-            self.sock.shutdown(socket.SHUT_WR)
-            self.sock.close()
+            if self.sock:
+                try:
+                    # Attempt full-duplex shutdown before close
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    # Socket may already be closed or half-closed
+                    pass
+                try:
+                    self.sock.close()
+                finally:
+                    self.sock = None
         except OSError as e:
             print(e)
 
 
 if __name__ == "__main__":
     ue_metrics = pb.UeMetrics()
-    ue_metrics.ue.ue_id = "1"
+    ue_metrics.ue.imsi = "1"
     ue_metrics.primary_cell.cell.pci = 1
     ue_metrics.primary_cell.metrics.rsrp = -50
     ue_metrics.primary_cell.metrics.rsrq = -5
